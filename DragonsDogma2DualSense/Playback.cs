@@ -31,17 +31,7 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
                 case "Silence":
                 case "Unavailable": return;
                 case "Sound":
-                    if(index.Sounds.TryGetValue(id,out var entries)&&entries.Length>0)
-                    {
-                        var e=entries[random.Next(entries.Length)];if(mixer.Play(PreparedWaves.Key(e),delay,
-                            group:currentLifetime,emitter:currentObject,loops:n.LoopCount,
-                            loopStart:(int)Math.Round(e.Playback.DelaySeconds*48000)))
-                        {
-                            Played++;
-                            if(recent.Count==64)recent.Dequeue();
-                            recent.Enqueue(new{event_id=currentEvent,frame=currentFrame,object_id=currentObject,lifetime=currentLifetime,sound=id,draw=e.Draw,hash=e.Hash,delay_frames=delay,length_frames=e.Length/2,loop_count=n.LoopCount});
-                        }
-                    }return;
+                    PlaySound(id,n,delay);return;
                 case "ActionStop":
                     foreach(uint child in n.Children)Stop(child,new HashSet<uint>());return;
                 case "ActionPlay":
@@ -61,6 +51,17 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
             foreach(uint child in n.Children)Visit(child,delay,switches,states,path,ref budget);
         }
         finally{path.Remove(id);}
+    }
+    void PlaySound(uint id,SoundNode node,int delay)
+    {
+        if(!index.Sounds.TryGetValue(id,out var entries)||entries.Length==0)return;
+        var entry=entries[random.Next(entries.Length)];
+        if(!mixer.Play(PreparedWaves.Key(entry),delay,group:currentLifetime,emitter:currentObject,
+            loops:node.LoopCount,loopStart:(int)Math.Round(entry.Playback.DelaySeconds*48000)))return;
+        Played++;
+        if(recent.Count==64)recent.Dequeue();
+        recent.Enqueue(new{event_id=currentEvent,frame=currentFrame,object_id=currentObject,lifetime=currentLifetime,
+            sound=id,draw=entry.Draw,hash=entry.Hash,delay_frames=delay,length_frames=entry.Length/2,loop_count=node.LoopCount});
     }
     void Stop(uint id,HashSet<uint> seen)
     {

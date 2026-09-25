@@ -10,7 +10,7 @@ This mod does not reproduce the PS5's official haptic feedback. Adaptive trigger
 - Windows x64, Dragon's Dogma 2 on Steam, and one DualSense or DualSense Edge. USB is recommended; Bluetooth and Edge hardware support remain unverified for this mod.
 - [.NET 10 Runtime for Windows x64](https://dotnet.microsoft.com/download/dotnet/10.0). The SDK is not required for installation.
 - A game-compatible version of [REFramework](https://github.com/praydog/REFramework).
-- Disable Steam Input for this game. For USB, keep the controller's audio device enabled in Windows.
+- For USB, keep the controller's audio device enabled in Windows.
 - Close other applications that control DualSense output.
 
 ## Install
@@ -46,7 +46,7 @@ Edit `config.json`, then restart the mod:
 
 ## Troubleshooting
 
-If vibration does not work, check the controller connection, Windows audio device, Steam Input setting, and REFramework compatibility. Keep only one supported controller connected.
+If vibration does not work, check the controller connection, Windows audio device, and REFramework compatibility. Keep only one supported controller connected.
 
 Not every action is supported. Game updates may require a mod update and regeneration of haptic data. DLC support is not automatic.
 

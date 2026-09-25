@@ -13,7 +13,7 @@ local player_character
 local player_wait_reason=""
 local error_text, last_event = "", "none"
 local routes, id_method
-local counts = {posted=0, matched=0, foreign=0, dropped=0, switch_updates=0, output_observed={}, output_blocked={}, output_samples={}}
+local counts = {posted=0, matched=0, foreign=0, dropped=0, switch_updates=0, output_observed={}, output_blocked={}}
 local recent = {}
 local function observe(id, object, result)
     local last=recent[#recent]
@@ -97,21 +97,16 @@ local function in_player_hierarchy(go)
     return false
 end
 local owner_accessors, owner_cache, owner_cache_count = {}, {}, 0
-local owner_layout, owner_layout_count = {}, 0
 local function ownership_accessors(t)
     local name=t:get_full_name()
     if owner_accessors[name] then return owner_accessors[name] end
     local result={}
-    local layout={}
-    local lower=name:lower()
-    local describe=owner_layout_count<16 and (lower:find("shell",1,true) or lower:find("magic",1,true) or lower:find("projectile",1,true))
     local names={owner=true,ownercharacter=true,ownerchara=true,originalowner=true,caster=true,attacker=true,shooter=true}
     local current=t
     for _=1,8 do
         if not current then break end
         for _,f in ipairs(current:get_fields()) do
             local n=f:get_name()
-            if describe and #layout<64 then layout[#layout+1]=n end
             local plain=n:lower():gsub("k__backingfield",""):gsub("[^a-z]","")
             if names[plain] then result[#result+1]={field=n} end
         end
@@ -121,7 +116,6 @@ local function ownership_accessors(t)
         end
         current=current:get_parent_type()
     end
-    if describe then owner_layout[name]=layout;owner_layout_count=owner_layout_count+1 end
     owner_accessors[name]=result;return result
 end
 local function owns(go)
@@ -307,32 +301,6 @@ local function install()
         if not method then return end
         sdk.hook(method,safe_pre(function(args)
             counts.output_observed[name]=(counts.output_observed[name] or 0)+1
-            -- Bounded, read-only ABI evidence. A native setter may use another
-            -- receiver slot or share its implementation with unrelated types.
-            -- Diagnostic failures must never disable the haptic bridge.
-            local sample_key=name..(suppressed and ":leased" or ":idle")
-            local samples=counts.output_samples[sample_key]
-            if not samples then samples={};counts.output_samples[sample_key]=samples end
-            if #samples<4 then
-                local sample={frame=frame}
-                samples[#samples+1]=sample
-                local ok,err=pcall(function()
-                    local target=saved_device or device()
-                    sample.target=tostring(target)
-                    for slot=1,2 do
-                        local value=args[slot]
-                        local item={raw=tostring(value)}
-                        sample["slot"..slot]=item
-                        if sdk.is_managed_object(value) then
-                            local object=sdk.to_managed_object(value)
-                            item.object=tostring(object)
-                            item.target=target~=nil and tostring(object)==tostring(target)
-                            item.type=object:get_type_definition():get_full_name()
-                        end
-                    end
-                end)
-                if not ok then sample.error=tostring(err) end
-            end
             if not fresh() or not suppressed or not saved_device then return end
             if sdk.is_managed_object(args[receiver_slot]) and tostring(sdk.to_managed_object(args[receiver_slot]))==tostring(saved_device) then
                 counts.output_blocked[name]=(counts.output_blocked[name] or 0)+1
@@ -374,7 +342,7 @@ re.on_frame(function()
             snapshot=snapshot+1
             local result=json.dump_file(STATE,{version=2,session=session,seq=snapshot,frame=frame,events=events,
                 enabled=enabled,hooks_ready=hooks_ready,player_ready=player_go~=nil and next(owned_ids)~=nil,
-                suppressed=suppressed,error=error_text,player_wait_reason=player_wait_reason,counts=counts,last_event=last_event,recent=recent,owner_layout=owner_layout,
+                suppressed=suppressed,error=error_text,player_wait_reason=player_wait_reason,counts=counts,last_event=last_event,recent=recent,
                 lifetimes=lifetime_snapshot(),lifetime_recent=lifetime_recent})
             if result~=true then error("IPC write failed") end
         end
