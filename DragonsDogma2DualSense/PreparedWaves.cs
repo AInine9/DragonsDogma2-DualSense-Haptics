@@ -6,8 +6,9 @@ using System.Text.Json;
 namespace DragonsDogma2DualSense;
 static class PreparedWaves
 {
-    public record Entry(string Hash,int Length,uint Sound,int Draw,SoundPlayback Playback);
-    public record Index(string CatalogHash,string Renderer,Dictionary<uint,Entry[]> Sounds);
+    public record Entry(string Hash,int Length,uint Sound,int Draw,SoundPlayback Playback,bool Omitted=false);
+    public record Index(string CatalogHash,string Renderer,Dictionary<uint,Entry[]> Sounds,string Filter="");
+    public const string Filter="single-middle-peak001-rms0001-v1";
     public const string Renderer="dd2-source-continuous-v4";
     public static string WavePath(string hash)
     {
@@ -17,7 +18,7 @@ static class PreparedWaves
     public static Index Load()
     {
         var i=JsonSerializer.Deserialize<Index>(File.ReadAllText(Files.Data("waves/index.json")),Configuration.Json)!;
-        if(i.CatalogHash!=Files.Sha(Files.Bundled("catalog.json")) || i.Renderer!=Renderer)throw new InvalidDataException("Prepared assets are outdated; run Setup.cmd");
+        if(i.CatalogHash!=Files.Sha(Files.Bundled("catalog.json")) || i.Renderer!=Renderer || i.Filter!=Filter)throw new InvalidDataException("Prepared assets are outdated; run Setup.cmd");
         return i;
     }
     public static void Prepare(SoundCatalog catalog,string extracted,string decoder)
@@ -50,20 +51,22 @@ static class PreparedWaves
                         cache[n.MediaSha256]=source;
                     }
                     var variant=catalog.Variant(id);int draws=SoundHaptics.DrawCount(variant);var choices=new List<Entry>();
-                    for(int draw=0;draw<draws;draw++)
+                    foreach(int draw in new[]{SoundHaptics.RepresentativeDraw(variant)})
                     {
                         var playback=SoundHaptics.Realize(variant,draw,draws);
                         if(Math.Abs(playback.PitchCents)>4800||playback.DelaySeconds>30)throw new InvalidDataException("Unbounded playback metadata");
                         var wave=SoundHaptics.Render(source,n.Family,playback);
                         if(wave.All(v=>Math.Abs(v)<.00001f))continue;
                         string hash=Convert.ToHexStringLower(SHA256.HashData(MemoryMarshal.AsBytes(wave.AsSpan())));
+                        // Keep the selected sound silent; never replace it with a stronger variant.
+                        if(SoundHaptics.IsNegligible(wave)){choices.Add(new(hash,wave.Length,id,draw,playback,true));continue;}
                         WriteWave(WavePath(hash),wave);choices.Add(new(hash,wave.Length,id,draw,playback));
                     }
                     index[id]=choices.ToArray();
                 }
                 cache.Clear();Console.WriteLine("Prepared "+group.Key);
             }
-            var result=new Index(Files.Sha(Files.Bundled("catalog.json")),Renderer,index);
+            var result=new Index(Files.Sha(Files.Bundled("catalog.json")),Renderer,index,Filter);
             File.WriteAllText(Files.Data("waves/index.json.tmp"),JsonSerializer.Serialize(result,Configuration.Json));
             File.Move(Files.Data("waves/index.json.tmp"),Files.Data("waves/index.json"),true);
             Console.WriteLine($"Prepared {index.Count} sound nodes, {index.Values.Sum(a=>a.Length)} waveform variants.");
@@ -73,13 +76,13 @@ static class PreparedWaves
     public static SampleStore Open(Index index)
     {
         var store=new SampleStore();
-        foreach(var e in index.Sounds.Values.SelectMany(x=>x))store.RegisterWave(Key(e),WavePath(e.Hash),e.Length,e.Hash);
+        foreach(var e in index.Sounds.Values.SelectMany(x=>x).Where(e=>!e.Omitted))store.RegisterWave(Key(e),WavePath(e.Hash),e.Length,e.Hash);
         return store;
     }
     public static string Key(Entry e)=>e.Sound+":"+e.Draw;
     public static void Verify()
     {
-        var index=Load();var waves=index.Sounds.Values.SelectMany(x=>x).DistinctBy(e=>e.Hash).ToArray();
+        var index=Load();var waves=index.Sounds.Values.SelectMany(x=>x).Where(e=>!e.Omitted).DistinctBy(e=>e.Hash).ToArray();
         foreach(var e in waves)ReadWave(WavePath(e.Hash),e.Length,e.Hash);
         Console.WriteLine($"PASS: {waves.Length} distinct float32 WAV files verified; {index.Sounds.Count} sound nodes.");
     }

@@ -56,6 +56,7 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
     {
         if(!index.Sounds.TryGetValue(id,out var entries)||entries.Length==0)return;
         var entry=entries[random.Next(entries.Length)];
+        if(entry.Omitted)return;
         if(!mixer.Play(PreparedWaves.Key(entry),delay,group:currentLifetime,emitter:currentObject,
             loops:node.LoopCount,loopStart:(int)Math.Round(entry.Playback.DelaySeconds*48000)))return;
         Played++;

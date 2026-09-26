@@ -1,6 +1,22 @@
 namespace DragonsDogma2DualSense;
 static class SoundHaptics
 {
+    // Conservative storage cutoff at unity gain, not a calibrated perception threshold.
+    // Keep a brief peak or meaningful energy on either actuator, even with a long tail.
+    internal static bool IsNegligible(float[] stereo)
+    {
+        if(stereo.Length%2!=0)throw new InvalidDataException("Invalid stereo samples");
+        double left=0,right=0;float peak=0;
+        for(int i=0;i<stereo.Length;i+=2)
+        {
+            float l=stereo[i],r=stereo[i+1];
+            if(!float.IsFinite(l)||!float.IsFinite(r))throw new InvalidDataException("Non-finite sample");
+            peak=Math.Max(peak,Math.Max(Math.Abs(l),Math.Abs(r)));
+            left+=(double)l*l;right+=(double)r*r;
+        }
+        return stereo.Length==0 || (peak<.01f && Math.Max(left,right)/(stereo.Length/2)<.001*.001);
+    }
+
     internal static float[] Render(float[] stereo, string family, SoundPlayback playback)
     {
         var tactile = Scale(ConvertChannels(ApplyPlayback(stereo, 2, playback, false), 2, family), playback.VolumeDb);
@@ -56,6 +72,19 @@ static class SoundHaptics
         || Variable(variant.RandomMin.DelaySeconds, variant.RandomMax.DelaySeconds)
         || Variable(variant.RandomMin.VolumeDb, variant.RandomMax.VolumeDb) ? 5 : 1;
     static bool Variable(double low, double high) => Math.Abs(high - low) > 1e-9;
+    internal static int RepresentativeDraw(SoundVariant variant)
+    {
+        int count=DrawCount(variant);
+        var values=Enumerable.Range(0,count).Select(draw=>Realize(variant,draw,count)).ToArray();
+        double pitch=(values.Min(v=>v.PitchCents)+values.Max(v=>v.PitchCents))/2;
+        double volume=(values.Min(v=>v.VolumeDb)+values.Max(v=>v.VolumeDb))/2;
+        double delay=(values.Min(v=>v.DelaySeconds)+values.Max(v=>v.DelaySeconds))/2;
+        // Match the existing comparison: choose an existing draw near the middle,
+        // rather than inventing a new waveform. Weights are selection heuristics.
+        double Distance(int draw)=>Math.Pow((values[draw].PitchCents-pitch)/100,2)
+            +Math.Pow((values[draw].VolumeDb-volume)/3,2)+Math.Pow((values[draw].DelaySeconds-delay)/.1,2);
+        return Enumerable.Range(0,count).OrderBy(Distance).First();
+    }
     internal static SoundPlayback Realize(SoundVariant variant, int draw, int count)
     {
         if (count < 1 || draw < 0 || draw >= count) throw new ArgumentOutOfRangeException(nameof(draw));
