@@ -1,6 +1,7 @@
 {
   "game": "",
   "gain": 1.0,
+  "damage_gain": 1.0,
   "auto_launch_game": true,
   "require_focus": true
 }

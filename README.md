@@ -35,6 +35,7 @@ The game launches through Steam by default. The mod also stops after the game cl
 Edit `config.json`, then restart the mod:
 
 - `gain` — Overall vibration strength, from `0.0` to `3.0`; default `1.0`.
+- `damage_gain` — Additional strength for supported flesh-impact sounds, from `0.0` to `3.0`; default `1.0`. Does not add missing hit events. The output limiter still applies.
 - `auto_launch_game` — Set to `false` to launch the game yourself; default `true`.
 - `require_focus` — Pause vibration while another window is active; default `true`.
 

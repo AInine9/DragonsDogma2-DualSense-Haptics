@@ -15,6 +15,8 @@ local error_text, last_event = "", "none"
 local routes, id_method
 local counts = {posted=0, matched=0, foreign=0, dropped=0, switch_updates=0, output_observed={}, output_blocked={}}
 local recent = {}
+local hit_controllers, hit_scheduled, hit_requests = {}, {}, {}
+local hit_controller_count, hit_scheduled_count, hit_request_count = 0, 0, 0
 local function observe(id, object, result)
     local last=recent[#recent]
     if last and last.id==id and last.object==object and last.result==result then
@@ -178,6 +180,8 @@ local function update_player()
     if not go or tostring(go)~=tostring(player_go) or tostring(player)~=tostring(player_character) then
         owned_ids={};switches={};states={};events={};owner_cache={};owner_cache_count=0
         lifetimes={};lifetime_count=0
+        hit_controllers={};hit_scheduled={};hit_requests={}
+        hit_controller_count=0;hit_scheduled_count=0;hit_request_count=0
     end
     player_go=go;player_character=player
     if id and id~=0 then owned_ids[tostring(id)]=true end
@@ -189,7 +193,12 @@ local function emit(id, object, request)
     if not enabled or not hooks_ready or not player_go then return end
     if not routes.events[tostring(id)] then observe(id,object,"uncatalogued");return end
     counts.matched=counts.matched+1
-    if not owned_ids[object] then counts.foreign=counts.foreign+1;observe(id,object,"foreign");return end
+    -- Only the confirmed flesh-hit event may use damage-call provenance.
+    -- Never promote an enemy emitter to general player ownership.
+    local pending=request and hit_requests[request]
+    if request then hit_requests[request]=nil end
+    local outgoing=id==1701720996 and pending and frame<=pending.until_frame
+    if not owned_ids[object] and not outgoing then counts.foreign=counts.foreign+1;observe(id,object,"foreign");return end
     -- Drop sounds while stopped/disconnected instead of replaying them later.
     if not fresh() or not suppressed then observe(id,object,"inactive");return end
     observe(id,object,"queued")
@@ -239,6 +248,92 @@ local function safe_pre(fn)
         return result
     end
 end
+local function install_hit_provenance()
+    local function typed(p,name)
+        if not p or not sdk.is_managed_object(p) then return nil end
+        local o=sdk.to_managed_object(p);local t=o:get_type_definition()
+        for _=1,8 do
+            if not t then return nil end
+            if t:get_full_name()==name then return o end
+            t=t:get_parent_type()
+        end
+    end
+    local function receiver(args)
+        for i=1,2 do
+            local o=typed(args[i],"app.WwiseDamageController")
+            if o then return o,i end
+        end
+    end
+    local function guarded(fn)
+        -- A destroyed object or unsupported optional path rejects the hit.
+        -- Never interrupt the game's sound call or disable the primary bridge.
+        return function(args)pcall(fn,args)end
+    end
+    local function unchanged(ret)return ret end
+    local update=find_method("app.WwiseDamageController","updateInfo",{"app.HitController.DamageInfo"})
+    local trigger=find_method("app.WwiseDamageController","updateTrigger",{})
+    local clear=find_method("app.WwiseDamageController","clear",{})
+    local posted=find_method("soundlib.SoundManager","postRequestInfo",{"soundlib.SoundManager.RequestInfo"})
+    if not update or not trigger or not clear or not posted then return end
+    sdk.hook(update,guarded(function(args)
+        local o,slot=receiver(args)
+        if not o then return end
+        local key=tostring(o);hit_controllers[key]=nil
+        local info=typed(args[slot+1],"app.HitController.DamageInfo")
+        if not info then return end
+        local attacker=info:call("get_AttackOwnerObject")
+        local melee=info:get_field("IsShootAttack")==false and info:get_field("IsMagicAttack")==false
+            and (info:get_field("IsSlashAttack")==true or info:get_field("IsBlowAttack")==true)
+        local allowed=melee and player_go~=nil and attacker~=nil and in_player_hierarchy(attacker)
+        if hit_controller_count>=256 then hit_controllers={};hit_controller_count=0 end
+        hit_controllers[key]={allowed=allowed,until_frame=frame+2}
+        hit_controller_count=hit_controller_count+1
+    end),unchanged)
+    sdk.hook(trigger,guarded(function(args)
+        local o=receiver(args);if not o then return end
+        local row=hit_controllers[tostring(o)]
+        local container=o:call("get_CachedContainer")
+        local id=o:get_field("TriggerId")
+        if not container or type(id)~="number" or id<=0 then return end
+        -- These fields identify the sound scheduled on a different engine job.
+        -- Reject overlapping schedules instead of guessing which attack won.
+        local key=tostring(container)..":"..tostring(id)
+        local prior=hit_scheduled[key]
+        local allowed=row~=nil and row.allowed and frame<=row.until_frame
+            and not (prior~=nil and frame<=prior.until_frame)
+        if hit_scheduled_count>=512 then hit_scheduled={};hit_scheduled_count=0 end
+        hit_scheduled[key]={allowed=allowed,until_frame=frame+2}
+        hit_scheduled_count=hit_scheduled_count+1
+    end),unchanged)
+    sdk.hook(clear,guarded(function(args)
+        local o=receiver(args);if o then hit_controllers[tostring(o)]=nil end
+    end),unchanged)
+    sdk.hook(posted,function(args)
+        local storage=thread.get_hook_storage();storage.dd2_outgoing_request=false
+        guarded(function()
+            local request=typed(args[1],"soundlib.SoundManager.RequestInfo") or typed(args[2],"soundlib.SoundManager.RequestInfo")
+            if not request then return end
+            local container=request:call("get_Container")
+            local trigger_id=request:call("get_TriggerId")
+            local key=container and tostring(container)..":"..tostring(trigger_id)
+            local row=key and hit_scheduled[key]
+            if key then hit_scheduled[key]=nil end
+            storage.dd2_outgoing_request=row~=nil and row.allowed and frame<=row.until_frame
+        end)()
+    end,function(ret)
+        pcall(function()
+            local id=integer(ret)&0xffffffff
+            if id==0 or id==0xffffffff then return end
+            hit_requests[id]=nil
+            if thread.get_hook_storage().dd2_outgoing_request then
+                if hit_request_count>=256 then hit_requests={};hit_request_count=0 end
+                hit_requests[id]={until_frame=frame+2};hit_request_count=hit_request_count+1
+            end
+        end)
+        return ret
+    end)
+end
+
 local function install()
     routes=json.load_file("dd2_dualsense_routes.json")
     if type(routes)~="table" or routes.version~=2 or type(routes.events)~="table" then error("Run Setup.cmd to install sound routes") end
@@ -275,6 +370,7 @@ local function install()
         local id=tostring(integer(args[2]))
         owned_ids[id]=nil;switches[id]=nil
     end))
+    install_hit_provenance()
     local function suppress_void()
         if fresh() and suppressed then return sdk.PreHookResult.SKIP_ORIGINAL end
     end

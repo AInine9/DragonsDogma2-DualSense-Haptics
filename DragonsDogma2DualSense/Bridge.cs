@@ -64,7 +64,7 @@ static class Bridge
         if(!File.Exists(Path.Combine(config.Game,"DD2.exe")))throw new InvalidDataException("Run Setup.cmd first");
         string input=Path.Combine(config.Game,"reframework/data/dd2_dualsense_state.json"),control=Path.Combine(config.Game,"reframework/data/dd2_dualsense_control.json");
         var catalog=SoundCatalog.Load();var prepared=PreparedWaves.Load();var samples=PreparedWaves.Open(prepared);
-        var mixer=new Mixer(samples,config.Gain);var playback=new Playback(catalog,prepared,mixer);var inbox=new Dd2Inbox();var reader=new ChangedJsonReader();var lifetime=new GameLifetime();
+        var mixer=new Mixer(samples,config.Gain);var playback=new Playback(catalog,prepared,mixer,config.DamageGain);var inbox=new Dd2Inbox();var reader=new ChangedJsonReader();var lifetime=new GameLifetime();
         using var hid=new HidRecovery(()=>new Hid(),Files.Log);
         Audio? audio=null;BluetoothHaptics? bluetooth=null;string binding="",error="Waiting for controller";double nextDevice=0,nextControl=0,nextHealth=0,nextGame=0;
         bool output=false,active=false;long received=0;string priorSession="";

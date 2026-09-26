@@ -2,7 +2,7 @@ namespace DragonsDogma2DualSense;
 
 // Selects the actual container route. Random choices are independent of Wwise's
 // private RNG; RTPC/state curves are retained in metadata, not guessed at runtime.
-sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mixer)
+sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mixer, float damageGain = 1)
 {
     readonly Random random=new();
     readonly Dictionary<uint,int> positions=[];
@@ -57,7 +57,10 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
         if(!index.Sounds.TryGetValue(id,out var entries)||entries.Length==0)return;
         var entry=entries[random.Next(entries.Length)];
         if(entry.Omitted)return;
-        if(!mixer.Play(PreparedWaves.Key(entry),delay,group:currentLifetime,emitter:currentObject,
+        // This bank is confirmed in live player damage playback. Scale only its
+        // existing source-derived signal; ownership and omitted choices stay intact.
+        float level=node.Bank=="meat_damage_m.sbnk.1.x64"?damageGain:1;
+        if(!mixer.Play(PreparedWaves.Key(entry),delay,level:level,group:currentLifetime,emitter:currentObject,
             loops:node.LoopCount,loopStart:(int)Math.Round(entry.Playback.DelaySeconds*48000)))return;
         Played++;
         if(recent.Count==64)recent.Dequeue();
