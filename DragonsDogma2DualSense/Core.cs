@@ -109,6 +109,10 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
     readonly float[] retiring = new float[960 * 2];
     int retirementFrame, retirementRemaining;
     long steals, limitedFrames;
+    float limiterGain = 1;
+    // Instant protection, gradual recovery; shared gain preserves actuator balance.
+    // 45 ms is a local tuning choice, not a measured ACE COMBAT parameter.
+    static readonly float limiterRelease = (float)(1 - Math.Exp(-1 / (48000 * .045)));
     bool suspended;
     public object Diagnostics { get { lock (gate) return new { voices = voices.Count, voice_steals = steals, limited_frames = limitedFrames }; } }
     public bool Playing { get { lock (gate) return voices.Count > 0 || retirementRemaining > 0; } }
@@ -135,12 +139,13 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
                 group==0?1:Math.Max(0,loops),Math.Clamp(loopStart*2,0,data.Length-2))); return true;
         }
     }
-    public void Stop() { lock (gate) { voices.Clear(); Array.Clear(retiring); retirementRemaining = 0; } }
+    public void Stop() { lock (gate) { voices.Clear(); Array.Clear(retiring); retirementRemaining = 0; limiterGain = 1; } }
     public void Suspend()
     {
         lock(gate)
         {
             suspended=true;
+            limiterGain=1;
             voices.RemoveAll(v=>v.Group==0 || v.Loops==1);
             Array.Clear(retiring);retirementRemaining=0;
         }
@@ -218,14 +223,17 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
                 retiring[p] = retiring[p + 1] = 0;
                 retirementFrame = (retirementFrame + 1) % 960;
                 if (retirementRemaining > 0) retirementRemaining--;
-                bool limited = false;
-                for (int c = 2; c < 4; c++)
+                if (limitOutput)
                 {
-                    int i = f * 4 + c;
-                    float magnitude = Math.Abs(output[i]);
-                    if (limitOutput && magnitude > .65f) { limited = true; output[i] = MathF.CopySign(.65f + .2f * (1 - MathF.Exp(-(magnitude - .65f) / .2f)), output[i]); }
+                    int i = f * 4 + 2;
+                    float magnitude = Math.Max(Math.Abs(output[i]), Math.Abs(output[i + 1]));
+                    float target = magnitude > .65f
+                        ? (.65f + .2f * (1 - MathF.Exp(-(magnitude - .65f) / .2f))) / magnitude : 1;
+                    limiterGain = target < limiterGain ? target : limiterGain + limiterRelease * (target - limiterGain);
+                    output[i] *= limiterGain;
+                    output[i + 1] *= limiterGain;
+                    if (limiterGain < .99999f) limitedFrames++;
                 }
-                if (limited) limitedFrames++;
             }
         }
     }
