@@ -34,6 +34,7 @@ static class Program
                 case "suppression-check":ChannelCheck.Suppression();break;
                 case "test":Tests.Run();break;
                 case "rebuild-waves":RebuildWaves.Run(args);break;
+                case "compact-wave-index":CompactWaveIndex.Run(args);break;
                 case "waveform-study":WaveformStudy.Run(args);break;
 #endif
                 default:Console.WriteLine("Commands: setup, launch, run, stop, status, uninstall, diagnose, verify-prepared");return args.Length==0||args[0]=="help"?0:1;
