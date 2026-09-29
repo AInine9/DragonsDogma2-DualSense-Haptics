@@ -28,6 +28,8 @@ sealed class SoundNode
 }
 sealed class SoundCatalog
 {
+    public sealed record NearbyRule(float Radius, float Gain, string Kind);
+    public Dictionary<uint,NearbyRule> NearbyEvents { get; set; } = [];
     public int Format { get; set; }
     public Dictionary<string,string> Banks { get; set; } = [];
     public Dictionary<uint,SoundNode> Nodes { get; set; } = [];

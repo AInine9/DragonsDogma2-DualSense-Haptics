@@ -15,6 +15,34 @@ local error_text, last_event = "", "none"
 local routes, id_method
 local counts = {posted=0, matched=0, foreign=0, dropped=0, switch_updates=0, output_observed={}, output_blocked={}}
 local recent = {}
+local nearby_positions,nearby_count={},0
+local function forget_nearby(id)
+    if nearby_positions[id] then
+        nearby_positions[id]=nil
+        nearby_count=nearby_count-1
+    end
+end
+local function sound_position(go)
+    local t=go and go:call("get_Transform")
+    local p=t and t:call("get_Position")
+    if not p then return nil end
+    local x,y,z=p.x,p.y,p.z
+    if type(x)~="number" or type(y)~="number" or type(z)~="number" then return nil end
+    if x~=x or y~=y or z~=z or math.abs(x)>1000000 or math.abs(y)>1000000 or math.abs(z)>1000000 then return nil end
+    return {x=x,y=y,z=z,frame=frame}
+end
+local function nearby_level(id,object)
+    local rule=routes and routes.nearby_events and routes.nearby_events[tostring(id)]
+    local p=nearby_positions[object]
+    if not rule or not p or frame-p.frame>2 then return nil end
+    if type(rule.radius)~="number" or rule.radius~=rule.radius or rule.radius<=5 or rule.radius>100
+        or type(rule.gain)~="number" or rule.gain~=rule.gain or rule.gain<=0 or rule.gain>1.5 then return nil end
+    local ok,q=pcall(sound_position,player_go)
+    if not ok or not q then return nil end
+    local distance=math.sqrt((p.x-q.x)^2+(p.y-q.y)^2+(p.z-q.z)^2)
+    if distance>=rule.radius then return nil end
+    return rule.gain*(1-math.max(0,distance-5)/(rule.radius-5))^2
+end
 local hit_controllers, hit_scheduled, hit_requests = {}, {}, {}
 local hit_controller_count, hit_scheduled_count, hit_request_count = 0, 0, 0
 local function observe(id, object, result)
@@ -179,6 +207,7 @@ local function update_player()
     if not ok then player,go,id=nil,nil,nil end
     if not go or tostring(go)~=tostring(player_go) or tostring(player)~=tostring(player_character) then
         owned_ids={};switches={};states={};events={};owner_cache={};owner_cache_count=0
+        nearby_positions={};nearby_count=0
         lifetimes={};lifetime_count=0
         hit_controllers={};hit_scheduled={};hit_requests={}
         hit_controller_count=0;hit_scheduled_count=0;hit_request_count=0
@@ -198,7 +227,11 @@ local function emit(id, object, request)
     local pending=request and hit_requests[request]
     if request then hit_requests[request]=nil end
     local outgoing=id==1701720996 and pending and frame<=pending.until_frame
-    if not owned_ids[object] and not outgoing then counts.foreign=counts.foreign+1;observe(id,object,"foreign");return end
+    local level=1
+    if not owned_ids[object] and not outgoing then
+        level=nearby_level(id,object)
+        if not level then counts.foreign=counts.foreign+1;observe(id,object,"foreign");return end
+    end
     -- Drop sounds while stopped/disconnected instead of replaying them later.
     if not fresh() or not suppressed then observe(id,object,"inactive");return end
     observe(id,object,"queued")
@@ -209,7 +242,7 @@ local function emit(id, object, request)
         lifetimes[token]={token=token,request=request,playing=0,frame=frame,id=id,object=object}
         lifetime_count=lifetime_count+1
     end
-    events[#events+1]={seq=event_seq,frame=frame,id=id,object=object,lifetime=token,switches=copy(switches[object]),states=copy(states)}
+    events[#events+1]={seq=event_seq,frame=frame,id=id,object=object,lifetime=token,level=level,switches=copy(switches[object]),states=copy(states)}
     if #events>128 then table.remove(events,1);counts.dropped=counts.dropped+1 end
     last_event=tostring(id)
 end
@@ -342,21 +375,31 @@ local function install()
     id_method=hook_required("via.simplewwise.Driver","getGameObjectId",{"via.GameObject","System.UInt32"},safe_pre(function(args)
         -- REFramework follows the wrapper JMP. The native target receives the
         -- GameObject in RCX (slot 1), and the UInt32 index in slot 2.
-        thread.get_hook_storage().dd2_owned=false
-        thread.get_hook_storage().dd2_owner_known=false
+        local storage=thread.get_hook_storage()
+        storage.dd2_owned=false
+        storage.dd2_owner_known=false
+        storage.dd2_nearby_position=nil
         if sdk.is_managed_object(args[1]) then
             -- A transient/destroyed emitter is simply not attributable. Never
             -- latch all hooks off because one component is being unloaded.
             local ok,owned=pcall(owns,sdk.to_managed_object(args[1]))
-            thread.get_hook_storage().dd2_owned=ok and owned==true
-            thread.get_hook_storage().dd2_owner_known=ok
+            storage.dd2_owned=ok and owned==true
+            storage.dd2_owner_known=ok
+            if ok and not owned and routes.nearby_events then
+                local positioned,p=pcall(sound_position,sdk.to_managed_object(args[1]))
+                if positioned then storage.dd2_nearby_position=p end
+            end
         end
     end),function(ret)
         local ok,err=pcall(function()
             local storage=thread.get_hook_storage()
             local id=tostring(integer(ret))
+            forget_nearby(id)
+            if storage.dd2_nearby_position and nearby_count<512 then
+                nearby_positions[id]=storage.dd2_nearby_position;nearby_count=nearby_count+1
+            end
             if storage.dd2_owned then owned_ids[id]=true
-            elseif storage.dd2_owner_known then owned_ids[id]=nil;switches[id]=nil end
+            elseif storage.dd2_owner_known then owned_ids[id]=nil;if not nearby_positions[id] then switches[id]=nil end end
         end)
         if not ok then fail(err) end;return ret
     end)
@@ -369,6 +412,7 @@ local function install()
     hook_required("via.simplewwise.SendRequest","unregisterGameObject",{"System.UInt64"},safe_pre(function(args)
         local id=tostring(integer(args[2]))
         owned_ids[id]=nil;switches[id]=nil
+        forget_nearby(id)
     end))
     install_hit_provenance()
     local function suppress_void()
@@ -412,7 +456,7 @@ local function install()
     -- they do not guess the material or claim an observed Switch value.
     local m=find_method("via.simplewwise.SendRequest","setSwitch",{"System.UInt64","System.UInt32","System.UInt32"})
     if m then sdk.hook(m,safe_pre(function(args)
-        local object=tostring(integer(args[2]));if not owned_ids[object] then return end
+        local object=tostring(integer(args[2]));if not owned_ids[object] and not nearby_positions[object] then return end
         switches[object]=switches[object] or {};switches[object][tostring(integer(args[3]) & 0xffffffff)]=integer(args[4]) & 0xffffffff
         counts.switch_updates=counts.switch_updates+1
     end),function(ret)return ret end) end
@@ -424,6 +468,12 @@ re.on_frame(function()
     frame=frame+1
     local ok,err=pcall(function()
         if frame%15==1 then
+            for id,p in pairs(nearby_positions) do
+                if frame-p.frame>120 then
+                    forget_nearby(id)
+                    if not owned_ids[id] then switches[id]=nil end
+                end
+            end
             local loaded,value=pcall(json.load_file,CONTROL);host=loaded and value or nil
             if type(host)~="table" then host=nil end
             if host and host.session==session and type(host.ack)=="number" then

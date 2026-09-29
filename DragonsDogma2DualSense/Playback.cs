@@ -12,12 +12,20 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
     long currentFrame;
     string currentObject = "";
     long currentLifetime;
+    float currentLevel=1;
+    internal static float ValidateLevel(float level)
+    {
+        if(!float.IsFinite(level)||level<0||level>1.5f)throw new InvalidDataException("Invalid playback level");
+        return level;
+    }
     public object[] Recent => recent.ToArray();
     public int Played {get;private set;}
-    public void Post(uint eventId,IReadOnlyDictionary<uint,uint> switches,IReadOnlyDictionary<uint,uint> states,long frame=0,string objectId="",long lifetime=0)
+    public void Post(uint eventId,IReadOnlyDictionary<uint,uint> switches,IReadOnlyDictionary<uint,uint> states,long frame=0,string objectId="",long lifetime=0,float level=1)
     {
+        ValidateLevel(level);
+        if(level==0)return;
         if(!catalog.Events.TryGetValue(eventId,out var actions))return;
-        currentEvent=eventId;currentFrame=frame;currentObject=objectId;currentLifetime=lifetime;
+        currentEvent=eventId;currentFrame=frame;currentObject=objectId;currentLifetime=lifetime;currentLevel=level;
         int budget=256;
         foreach(uint action in actions)Visit(action,0,switches,states,new HashSet<uint>(),ref budget);
     }
@@ -59,13 +67,13 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
         if(entry.Omitted)return;
         // This bank is confirmed in live player damage playback. Scale only its
         // existing source-derived signal; ownership and omitted choices stay intact.
-        float level=node.Bank=="meat_damage_m.sbnk.1.x64"?damageGain:1;
+        float level=currentLevel*(node.Bank=="meat_damage_m.sbnk.1.x64"?damageGain:1);
         if(!mixer.Play(PreparedWaves.Key(entry),delay,level:level,group:currentLifetime,emitter:currentObject,
             loops:node.LoopCount,loopStart:(int)Math.Round(entry.Playback.DelaySeconds*48000)))return;
         Played++;
         if(recent.Count==64)recent.Dequeue();
         recent.Enqueue(new{event_id=currentEvent,frame=currentFrame,object_id=currentObject,lifetime=currentLifetime,
-            sound=id,draw=entry.Draw,hash=entry.Hash,delay_frames=delay,length_frames=entry.Length/2,loop_count=node.LoopCount});
+            sound=id,draw=entry.Draw,hash=entry.Hash,level,delay_frames=delay,length_frames=entry.Length/2,loop_count=node.LoopCount});
     }
     void Stop(uint id,HashSet<uint> seen)
     {

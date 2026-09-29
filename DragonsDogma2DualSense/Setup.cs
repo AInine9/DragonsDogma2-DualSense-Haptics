@@ -118,7 +118,7 @@ static class Setup
         if(File.Exists(target)&&(previous==null||Files.Sha(target)!=previous.InstalledSha256))throw new InvalidDataException("Existing bridge was modified; it was not overwritten");
         string route=Path.Combine(data,"dd2_dualsense_routes.json");
         if(File.Exists(route)&&(previous==null||Files.Sha(route)!=previous.RoutesSha256))throw new InvalidDataException("Existing route table was modified; it was not overwritten");
-        var catalog=SoundCatalog.Load();File.WriteAllText(Files.Data("routes.json"),JsonSerializer.Serialize(new{version=2,events=catalog.Events.Keys.ToDictionary(x=>x.ToString(),_=>true)}));
+        var catalog=SoundCatalog.Load();File.WriteAllText(Files.Data("routes.json"),JsonSerializer.Serialize(new{version=2,events=catalog.Events.Keys.ToDictionary(x=>x.ToString(),_=>true),nearby_events=catalog.NearbyEvents},Configuration.Json));
         string source=Files.Bundled(Script);File.Copy(source,target+".installing",true);File.Move(target+".installing",target,true);
         File.Copy(Files.Data("routes.json"),route+".installing",true);File.Move(route+".installing",route,true);
         Directory.CreateDirectory(Path.GetDirectoryName(nativeTarget)!);

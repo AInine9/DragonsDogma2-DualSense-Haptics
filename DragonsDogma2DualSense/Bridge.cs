@@ -50,7 +50,8 @@ static class Bridge
     static IReadOnlyDictionary<uint,uint> Values(JsonNode? node)=>node is JsonObject o?o.ToDictionary(x=>uint.Parse(x.Key),x=>x.Value!.GetValue<uint>()):new Dictionary<uint,uint>();
     internal static void PostRow(Playback playback, JsonNode row) => playback.Post(
         row["id"]!.GetValue<uint>(), Values(row["switches"]), Values(row["states"]),
-        row["frame"]!.GetValue<long>(), row["object"]?.ToString() ?? "",row["lifetime"]?.GetValue<long>()??0);
+        row["frame"]!.GetValue<long>(), row["object"]?.ToString() ?? "",row["lifetime"]?.GetValue<long>()??0,EventLevel(row));
+    internal static float EventLevel(JsonNode row)=>Playback.ValidateLevel(row["level"]?.GetValue<float>()??1);
     public static void Run()
     {
         using var mutex=new Mutex(false,MutexName);
