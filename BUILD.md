@@ -18,3 +18,14 @@ A prebuilt native audio guard is included. To rebuild it with Zig 0.15.2:
 The guard's source and its MinHook dependency are in `native`.
 
 The catalog contains routing metadata and source hashes, not sound recordings. Run the packaged `Setup.cmd` against your own game installation to generate haptic data.
+
+Catalog sources live in `distribution/catalog/`. `manifest.json` lists the parts
+for banks, events, nearby rules, and nodes. Node files are grouped by kind, with
+at most 256 entries per file. Each entry stays on one line for readable diffs.
+Edit these parts; `package-release.ps1` automatically combines them into the
+single `bin/catalog.json` expected by the runtime. Duplicate IDs within a section
+are rejected. To generate just the runtime catalog:
+
+```powershell
+./tools/build-catalog.ps1 -Output work/catalog.json
+```
