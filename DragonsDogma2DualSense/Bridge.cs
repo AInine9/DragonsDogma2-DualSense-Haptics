@@ -44,13 +44,60 @@ sealed class Dd2Inbox
         return accepted.GroupBy(x=>x["seq"]!.GetValue<long>()).Select(g=>g.First()).ToArray();
     }
 }
+// Bound disk logging even when different damaged assets alternate in one burst.
+sealed class PlaybackErrorLog
+{
+    string previous="";
+    double next;
+    public void Report(Exception error,double now,Action<string> log)
+    {
+        if(error.Message==previous||now<next)return;
+        previous=error.Message;next=now+1;
+        log("Skipped playback event: "+previous);
+    }
+}
 static class Bridge
 {
     public const string MutexName=@"Local\DragonsDogma2DualSenseBridge";
-    static IReadOnlyDictionary<uint,uint> Values(JsonNode? node)=>node is JsonObject o?o.ToDictionary(x=>uint.Parse(x.Key),x=>x.Value!.GetValue<uint>()):new Dictionary<uint,uint>();
+    static IReadOnlyDictionary<uint,uint> Values(JsonNode? node)
+    {
+        var values=new Dictionary<uint,uint>();
+        if(node is null)return values;
+        if(node is not JsonObject entries)throw new InvalidDataException("Invalid switch/state map");
+        foreach(var entry in entries)
+        {
+            if(!uint.TryParse(entry.Key,out uint key)||entry.Value is not JsonValue value||!value.TryGetValue<uint>(out uint number))
+                throw new InvalidDataException("Invalid switch/state value");
+            values.Add(key,number);
+        }
+        return values;
+    }
     internal static void PostRow(Playback playback, JsonNode row) => playback.Post(
         row["id"]!.GetValue<uint>(), Values(row["switches"]), Values(row["states"]),
         row["frame"]!.GetValue<long>(), row["object"]?.ToString() ?? "",row["lifetime"]?.GetValue<long>()??0,EventLevel(row));
+    // The inbox has acknowledged the whole batch. A bad local asset or row must
+    // not discard later events or tear down a healthy controller output.
+    internal static int PostRows(Playback playback,IEnumerable<JsonNode> rows,Action<Exception> onError)
+    {
+        int received=0;
+        foreach(var row in rows)
+        {
+            try{PostRow(playback,row);received++;}
+            catch(Exception e) when(e is IOException or InvalidDataException or UnauthorizedAccessException
+                or InvalidOperationException or System.Text.Json.JsonException or FormatException or OverflowException)
+            {onError(e);}
+        }
+        return received;
+    }
+    // Only a current snapshot with healthy output and player/focus readiness
+    // reaches this path. Resume before dispatch so its first fresh event survives.
+    internal static int PostActiveRows(Mixer mixer,Playback playback,IEnumerable<JsonNode> rows,IReadOnlyDictionary<long,bool> lifetimes,Action<Exception> onError)
+    {
+        // Prune paused sounds before a callback can run during cold file reads.
+        mixer.SyncLifetimes(lifetimes);mixer.Resume();
+        int received=PostRows(playback,rows,onError);
+        mixer.SyncLifetimes(lifetimes);return received;
+    }
     internal static float EventLevel(JsonNode row)=>Playback.ValidateLevel(row["level"]?.GetValue<float>()??1);
     public static void Run()
     {
@@ -68,7 +115,7 @@ static class Bridge
         var mixer=new Mixer(samples,config.Gain);var playback=new Playback(catalog,prepared,mixer,config.DamageGain);var inbox=new Dd2Inbox();var reader=new ChangedJsonReader();var lifetime=new GameLifetime();
         using var hid=new HidRecovery(()=>new Hid(),Files.Log);
         Audio? audio=null;BluetoothHaptics? bluetooth=null;string binding="",error="Waiting for controller";double nextDevice=0,nextControl=0,nextHealth=0,nextGame=0;
-        bool output=false,active=false;long received=0;string priorSession="";
+        bool output=false,active=false;long received=0;string priorSession="";var playbackErrors=new PlaybackErrorLog();
         using var console=new ConsoleLifetime();
         using var nativeLease=new NativeAudioLease();
         File.Delete(Files.Data("stop.request"));Files.Log("DD2 companion started; prepared game-sound WAV playback.");
@@ -112,9 +159,9 @@ static class Bridge
                         active=output&&inbox.Ready&&inbox.Player&&inbox.Suppressed&&(!config.RequireFocus||Focus.IsGame());
                         if(active)
                         {
-                            foreach(var row in rows){PostRow(playback,row);received++;}
+                            received+=PostActiveRows(mixer,playback,rows,inbox.Lifetimes,e=>playbackErrors.Report(e,now,Files.Log));
                         }
-                        mixer.SyncLifetimes(inbox.Lifetimes);
+                        else mixer.SyncLifetimes(inbox.Lifetimes);
                     }
                     active=output&&inbox.Ready&&inbox.Player&&inbox.Suppressed&&now-inbox.Last<1&&(!config.RequireFocus||Focus.IsGame());
                     if(!inbox.Ready||!inbox.Player||now-inbox.Last>=1)mixer.Stop();
