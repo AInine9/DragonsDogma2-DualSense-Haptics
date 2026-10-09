@@ -76,6 +76,7 @@ static class Setup
         game=Path.GetFullPath(game??throw new ArgumentException("Game folder is required"));
         if(!File.Exists(Path.Combine(game,"DD2.exe")))throw new InvalidDataException("DD2.exe was not found in that folder");
         if(!prepare&&!File.Exists(Path.Combine(game,"dinput8.dll")))throw new InvalidOperationException("Install REFramework for DD2 first");
+        if(!prepare)ValidateInstall(game);
         var catalog=SoundCatalog.Load();string? decoder=Option(args,"--decoder"),extractor=Option(args,"--pak-tool"),extracted=Option(args,"--extracted");
         if(decoder==null){string zip=Download("vgmstream-r2117.zip","https://github.com/vgmstream/vgmstream/releases/download/r2117/vgmstream-win64.zip","6c4a8a3813864fefed081bbd337dbc0ad93bf88e0b92f5db98d7ab258b22dc6c");string dir=Files.Data("tools/vgmstream-r2117");ZipFile.ExtractToDirectory(zip,dir,true);decoder=Path.Combine(dir,"vgmstream-cli.exe");}
         if(extracted==null)
@@ -95,6 +96,44 @@ static class Setup
         Console.WriteLine(prepare?"Assets prepared; game files were not changed.":"Setup complete. Use Start-Mod.cmd.");
     }
     record InstallRecord(string Game,string InstalledSha256,string RoutesSha256,string NativeSha256="");
+    internal static string GameRecord(string game) => Path.Combine(game,"reframework/data/dd2_dualsense_install-record.json");
+    static InstallRecord? ReadRecord(string path) => File.Exists(path)
+        ? JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(path)) ?? throw new InvalidDataException("Invalid install record: "+path)
+        : null;
+    static InstallRecord? PreviousInstall(string game)
+    {
+        var local=ReadRecord(Files.Data("install-record.json"));
+        var saved=ReadRecord(GameRecord(game));
+        foreach(var r in new[]{local,saved})
+            if(r!=null&&!Path.GetFullPath(r.Game).Equals(Path.GetFullPath(game),StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Uninstall from the previous game folder first");
+        // The game-side record survives deletion of the extracted package and is authoritative.
+        return saved??local;
+    }
+    static string Routes()
+    {
+        var catalog=SoundCatalog.Load();
+        return JsonSerializer.Serialize(new{version=2,events=catalog.Events.Keys.ToDictionary(x=>x.ToString(),_=>true),nearby_events=catalog.NearbyEvents},Configuration.Json);
+    }
+    static string TextHash(string text) => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
+    internal static void CheckInstallFile(string file,string? recorded,string bundled,string legacy)
+    {
+        if(!File.Exists(file))return;
+        string actual=Files.Sha(file);
+        // With a record, never bypass modification detection. Without one, accept only exact
+        // bundled bytes or the original public v1.0.0 payload (before game-side records).
+        if(recorded!=null ? actual==recorded : actual==bundled||actual==legacy)return;
+        throw new InvalidDataException("Unowned or modified file was preserved: "+file);
+    }
+    static void ValidateInstall(string game)
+    {
+        var previous=PreviousInstall(game);
+        string native=Files.Bundled(NativePlugin),script=Files.Bundled(Script);
+        if(!File.Exists(native)||!File.Exists(script))throw new InvalidDataException("Bridge or native audio guard is missing from this package");
+        CheckInstallFile(Path.Combine(game,"reframework/plugins",NativePlugin),previous?.NativeSha256,Files.Sha(native),"76bd7da57ac6353b04e44c5a09cb8cf51c406aa413617b70a666981f23a9e8f0");
+        CheckInstallFile(Path.Combine(game,"reframework/autorun",Script),previous?.InstalledSha256,Files.Sha(script),"76ab06d0071ac5c63b2b24ba79a566576d8ee5f32999b21a555ad575f828224b");
+        CheckInstallFile(Path.Combine(game,"reframework/data/dd2_dualsense_routes.json"),previous?.RoutesSha256,TextHash(Routes()),"e9c6ae87ef931aceb52e46dcdc244551967cdae56f694b1de42820b9ce9ec579");
+    }
     internal static void CheckOwned(string file,string? expected)
     {
         if(File.Exists(file)&&(string.IsNullOrEmpty(expected)||Files.Sha(file)!=expected))
@@ -108,27 +147,28 @@ static class Setup
     public static void Install(string game)
     {
         if(string.IsNullOrWhiteSpace(game)||!File.Exists(Path.Combine(game,"DD2.exe"))||!File.Exists(Path.Combine(game,"dinput8.dll")))throw new InvalidOperationException("Run Setup.cmd with a valid DD2 and REFramework installation first");
+        ValidateInstall(game);
         string folder=Path.Combine(game,"reframework/autorun"),data=Path.Combine(game,"reframework/data");Directory.CreateDirectory(folder);Directory.CreateDirectory(data);
         string target=Path.Combine(folder,Script),record=Files.Data("install-record.json");
-        InstallRecord? previous=File.Exists(record)?JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(record)):null;
         string nativeSource=Files.Bundled(NativePlugin),nativeTarget=Path.Combine(game,"reframework/plugins",NativePlugin);
-        if(!File.Exists(nativeSource))throw new InvalidDataException("Native audio guard is missing from this package");
-        CheckOwned(nativeTarget,previous?.NativeSha256);
-        if(previous!=null&&!Path.GetFullPath(previous.Game).Equals(Path.GetFullPath(game),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Uninstall from the previous game folder first");
-        if(File.Exists(target)&&(previous==null||Files.Sha(target)!=previous.InstalledSha256))throw new InvalidDataException("Existing bridge was modified; it was not overwritten");
         string route=Path.Combine(data,"dd2_dualsense_routes.json");
-        if(File.Exists(route)&&(previous==null||Files.Sha(route)!=previous.RoutesSha256))throw new InvalidDataException("Existing route table was modified; it was not overwritten");
-        var catalog=SoundCatalog.Load();File.WriteAllText(Files.Data("routes.json"),JsonSerializer.Serialize(new{version=2,events=catalog.Events.Keys.ToDictionary(x=>x.ToString(),_=>true),nearby_events=catalog.NearbyEvents},Configuration.Json));
+        File.WriteAllText(Files.Data("routes.json"),Routes());
         string source=Files.Bundled(Script);File.Copy(source,target+".installing",true);File.Move(target+".installing",target,true);
         File.Copy(Files.Data("routes.json"),route+".installing",true);File.Move(route+".installing",route,true);
         Directory.CreateDirectory(Path.GetDirectoryName(nativeTarget)!);
         File.Copy(nativeSource,nativeTarget+".installing",true);File.Move(nativeTarget+".installing",nativeTarget,true);
-        Files.Save(record,new InstallRecord(game,Files.Sha(source),Files.Sha(route),Files.Sha(nativeSource)));
+        var installed=new InstallRecord(game,Files.Sha(source),Files.Sha(route),Files.Sha(nativeSource));
+        if(!Files.Atomic(GameRecord(game),installed))throw new IOException("Cannot save game-side install record");
+        if(!Files.Atomic(record,installed))throw new IOException("Cannot save local install record");
     }
     public static void Uninstall()
     {
         if(Files.GameRunning()!=false)throw new InvalidOperationException("Close Dragon's Dogma 2 before uninstalling");
-        string path=Files.Data("install-record.json");var r=JsonSerializer.Deserialize<InstallRecord>(File.ReadAllText(path))!;
+        string path=Files.Data("install-record.json");
+        string? game=ReadRecord(path)?.Game;
+        game??=Configuration.Read().Game is {Length:>0} configured?configured:Discover();
+        var r=game==null?null:PreviousInstall(game);
+        if(r==null)throw new InvalidOperationException("Install record not found; run Setup.cmd first");
         string script=Path.Combine(r.Game,"reframework/autorun",Script),routes=Path.Combine(r.Game,"reframework/data/dd2_dualsense_routes.json");
         string native=Path.Combine(r.Game,"reframework/plugins",NativePlugin);
         if(r.NativeSha256.Length>0)CheckOwned(native,r.NativeSha256);
@@ -143,6 +183,7 @@ static class Setup
         var owned=new List<(string File,string Hash)>{(script,r.InstalledSha256),(routes,r.RoutesSha256)};
         if(r.NativeSha256.Length>0)owned.Add((native,r.NativeSha256));
         RemoveOwned(owned.ToArray());
+        File.Delete(GameRecord(r.Game));
         if(File.Exists(path))File.Delete(path);
         Console.WriteLine("Bridge and native audio guard removed. Local generated assets remain in data.");
     }

@@ -24,6 +24,12 @@ This mod does not reproduce the PS5's official haptic feedback. Adaptive trigger
 
 Game audio files are not included in the mod.
 
+## Update or reinstall
+
+Close the game and the mod console, extract the new release outside the game directory, and run `Setup.cmd`. You may delete the old extracted mod folder first; Setup keeps an installation record in the game folder and can also recognize unchanged files from the original v1.0.0 release. Modified or unknown files are preserved and reported before sound preparation begins.
+
+Deleting the extracted folder also removes your configuration and generated haptic data. Setup will regenerate the data; keep `config.json` if you want to retain your settings.
+
 ## Usage
 
 Run `Start-Mod.cmd` whenever you want to use the mod. **The mod runs only while its console window is open.** Close the window or press Ctrl+C to stop it.
