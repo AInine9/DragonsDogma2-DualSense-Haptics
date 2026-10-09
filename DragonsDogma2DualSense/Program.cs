@@ -6,6 +6,7 @@ static class Program
     {
         Console.OutputEncoding=System.Text.Encoding.UTF8;
         AppHost.Initialize();
+        Files.EchoLogsToConsole = args.FirstOrDefault() is not ("run" or "start" or "launch");
         try
         {
             switch(args.FirstOrDefault()??"help")
