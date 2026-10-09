@@ -17,8 +17,18 @@ static class SoundHaptics
         return stereo.Length==0 || (peak<.01f && Math.Max(left,right)/(stereo.Length/2)<.001*.001);
     }
 
+    internal const int MaxContentFrames=48000*60;
+    internal const int MaxDelaySeconds=30;
     internal static float[] Render(float[] stereo, string family, SoundPlayback playback)
     {
+        if(stereo.Length%2!=0||stereo.Length/2>MaxContentFrames
+            ||!double.IsFinite(playback.PitchCents)||Math.Abs(playback.PitchCents)>4800
+            ||!double.IsFinite(playback.DelaySeconds)||playback.DelaySeconds<0||playback.DelaySeconds>MaxDelaySeconds
+            ||!double.IsFinite(playback.VolumeDb))throw new InvalidDataException("Unbounded playback metadata or source");
+        // Pitch is applied before conversion. Reject an oversized result before
+        // allocating it; lowering pitch must not bypass the existing 60-second limit.
+        double frames=Math.Ceiling((stereo.Length/2)/Math.Pow(2,playback.PitchCents/1200.0));
+        if(frames>MaxContentFrames)throw new InvalidDataException("Pitched haptic source exceeds 60 seconds");
         var tactile = Scale(ConvertChannels(ApplyPlayback(stereo, 2, playback, false), 2, family), playback.VolumeDb);
         // Match PCM16's silence floor, so inaudible branches cannot suppress rumble.
         for (int i = 0; i < tactile.Length; i++) tactile[i] = (float)Math.Round(tactile[i] * 32767) / 32767f;
@@ -27,38 +37,62 @@ static class SoundHaptics
 
     internal static float[] ReadSource(string path, bool stereo = false)
     {
-        using var reader = new BinaryReader(File.OpenRead(path));
-        if (new string(reader.ReadChars(4)) != "RIFF") throw new InvalidDataException("Source must be RIFF");
-        reader.ReadUInt32(); if (new string(reader.ReadChars(4)) != "WAVE") throw new InvalidDataException("Source must be WAVE");
-        int channels = 0, rate = 0; byte[]? pcm = null;
-        while (reader.BaseStream.Position + 8 <= reader.BaseStream.Length)
+        using var stream=File.OpenRead(path);
+        using var reader=new BinaryReader(stream);
+        // PCM16 is the decoder contract. Bound even unknown metadata before scanning.
+        if(stream.Length<12||stream.Length>192L*1024*1024)throw new InvalidDataException("Invalid source size");
+        if(reader.ReadUInt32()!=0x46464952||reader.ReadUInt32()!=stream.Length-8||reader.ReadUInt32()!=0x45564157)
+            throw new InvalidDataException("Invalid RIFF source");
+        int channels=0,rate=0;long dataOffset=-1,dataBytes=0;bool format=false;
+        while(stream.Position<stream.Length)
         {
-            string tag = new(reader.ReadChars(4)); int length = checked((int)reader.ReadUInt32());
-            byte[] chunk = reader.ReadBytes(length); if (chunk.Length != length) throw new InvalidDataException("Truncated source");
-            if (tag == "fmt ")
+            if(stream.Length-stream.Position<8)throw new InvalidDataException("Truncated source chunk");
+            uint tag=reader.ReadUInt32(),length=reader.ReadUInt32();long end=stream.Position+length;
+            if(end+(length&1)>stream.Length)throw new InvalidDataException("Invalid source chunk length");
+            if(tag==0x20746d66)
             {
-                if (chunk.Length < 16 || BitConverter.ToUInt16(chunk) != 1 || BitConverter.ToUInt16(chunk, 14) != 16) throw new InvalidDataException("Source must be PCM16");
-                channels = BitConverter.ToUInt16(chunk, 2); rate = checked((int)BitConverter.ToUInt32(chunk, 4));
+                if(format||length<16||length>4096||reader.ReadUInt16()!=1)throw new InvalidDataException("Source must be PCM16");
+                channels=reader.ReadUInt16();uint sampleRate=reader.ReadUInt32(),byteRate=reader.ReadUInt32();
+                int align=reader.ReadUInt16(),bits=reader.ReadUInt16();
+                if(channels is <1 or >8||sampleRate is <8000 or >192000||bits!=16||align!=channels*2||byteRate!=sampleRate*align)
+                    throw new InvalidDataException("Invalid PCM16 source format");
+                rate=(int)sampleRate;format=true;
             }
-            if (tag == "data") pcm = chunk;
-            if ((length & 1) != 0) reader.ReadByte();
+            else if(tag==0x61746164)
+            {
+                if(dataOffset>=0)throw new InvalidDataException("Duplicate source data");
+                dataOffset=stream.Position;dataBytes=length;
+            }
+            stream.Position=end+(length&1);
         }
-        if (channels is < 1 or > 8 || rate is < 8000 or > 192000 || pcm == null || pcm.Length % (channels * 2) != 0) throw new InvalidDataException("Invalid source format");
-        int inputFrames = pcm.Length / (channels * 2);
-        var mono = new float[inputFrames];
-        for (int f = 0; f < inputFrames; f++)
-            for (int c = 0; c < channels; c++) mono[f] += BitConverter.ToInt16(pcm, (f * channels + c) * 2) / (32768f * channels);
-        int outputChannels = stereo ? 2 : 1;
-        var result = new float[(int)((long)inputFrames * 48000 / rate) * outputChannels];
-        for (int i = 0; i < result.Length / outputChannels; i++)
+        if(!format||dataOffset<0||dataBytes%(channels*2)!=0||dataBytes/(channels*2)>(long)rate*60)
+            throw new InvalidDataException("Invalid source duration or data");
+        int inputFrames=(int)(dataBytes/(channels*2)),outputFrames=(int)((long)inputFrames*48000/rate),outputChannels=stereo?2:1;
+        // Decode from a fixed window; no whole PCM or high-rate mono float array.
+        var result=new float[outputFrames*outputChannels];
+        byte[] window=new byte[65536];long windowStart=-1;int windowLength=0;
+        void Frame(int frame,out float left,out float right)
         {
-            double t = i * (double)rate / 48000.0; int a = (int)t, b = Math.Min(a + 1, mono.Length - 1);
-            for (int c = 0; c < outputChannels; c++)
+            long offset=(long)frame*channels*2;
+            if(offset<windowStart||offset+channels*2>windowStart+windowLength)
             {
-                float x = stereo && channels == 2 ? BitConverter.ToInt16(pcm, (a * 2 + c) * 2) / 32768f : mono[a];
-                float y = stereo && channels == 2 ? BitConverter.ToInt16(pcm, (b * 2 + c) * 2) / 32768f : mono[b];
-                result[i * outputChannels + c] = x + (y - x) * (float)(t - a);
+                windowStart=offset;windowLength=(int)Math.Min(window.Length,dataBytes-offset);
+                stream.Position=dataOffset+offset;stream.ReadExactly(window.AsSpan(0,windowLength));
             }
+            int at=(int)(offset-windowStart);
+            if(stereo&&channels==2){left=BitConverter.ToInt16(window,at)/32768f;right=BitConverter.ToInt16(window,at+2)/32768f;}
+            else
+            {
+                float mono=0;for(int c=0;c<channels;c++)mono+=BitConverter.ToInt16(window,at+c*2)/(32768f*channels);
+                left=right=mono;
+            }
+        }
+        for(int i=0;i<outputFrames;i++)
+        {
+            double t=i*(double)rate/48000.0;int a=(int)t,b=Math.Min(a+1,inputFrames-1);
+            Frame(a,out float x,out float xr);Frame(b,out float y,out float yr);
+            result[i*outputChannels]=x+(y-x)*(float)(t-a);
+            if(stereo)result[i*2+1]=xr+(yr-xr)*(float)(t-a);
         }
         return result;
     }
@@ -139,7 +173,7 @@ static class SoundHaptics
         if (source.Any(v => !float.IsFinite(v))) throw new InvalidDataException("Non-finite source");
         int frames = source.Length / channels;
         if (frames == 0) return [];
-        if (frames > 48000 * 60) throw new InvalidDataException("Haptic source exceeds 60 seconds");
+        if (frames > MaxContentFrames) throw new InvalidDataException("Haptic source exceeds 60 seconds");
         // Preserve the complete recorded envelope, including delayed impacts and
         // sustained magic. No fixed-duration crop or imposed exponential decay.
         // These artistic tunings are not a calibrated actuator transfer function.

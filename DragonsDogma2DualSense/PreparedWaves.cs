@@ -10,6 +10,8 @@ static class PreparedWaves
     public record Index(string CatalogHash,string Renderer,Dictionary<uint,Entry[]> Sounds,string Filter="");
     public const string Filter="single-middle-peak001-rms0001-v1";
     public const string Renderer="dd2-source-continuous-v4";
+    // Content after pitch is bounded to 60 seconds, plus up to 30 seconds of authored delay.
+    internal const int MaxWaveSamples=2*(SoundHaptics.MaxContentFrames+48000*SoundHaptics.MaxDelaySeconds);
     public static string WavePath(string hash)
     {
         if(hash.Length!=64 || !hash.All(Uri.IsHexDigit))throw new InvalidDataException("Invalid waveform hash");
@@ -24,7 +26,7 @@ static class PreparedWaves
     public static void Prepare(SoundCatalog catalog,string extracted,string decoder)
     {
         Directory.CreateDirectory(Files.Data("waves"));Directory.CreateDirectory(Files.Data("sources"));
-        var index=new Dictionary<uint,Entry[]>();var cache=new Dictionary<string,float[]>();
+        var index=new Dictionary<uint,Entry[]>();var cache=new Dictionary<string,float[]>();long sourceBytes=0;
         string scratch=Files.Data("decode-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(scratch);
         try
         {
@@ -46,15 +48,17 @@ static class PreparedWaves
                         string input=Path.Combine(scratch,"source.wem"),output=Path.Combine(scratch,"source.wav");
                         File.WriteAllBytes(input,wem);Setup.Exec(decoder,scratch,"-i","-o",output,input);
                         source=SoundHaptics.ReadSource(output,true);
-                        if(source.Length>48000*2*60)throw new InvalidDataException("Unexpected sound duration");
+                        if(source.Length>SoundHaptics.MaxContentFrames*2)throw new InvalidDataException("Unexpected sound duration");
                         File.Copy(output,Files.Data("sources/"+n.MediaSha256+".wav"),true);
-                        cache[n.MediaSha256]=source;
+                        // Preparation may visit many distinct media in one bank.
+                        // Bound retained decoded sources as well as each individual read.
+                        if(sourceBytes+(long)source.Length*4>64L*1024*1024){cache.Clear();sourceBytes=0;}
+                        cache[n.MediaSha256]=source;sourceBytes+=(long)source.Length*4;
                     }
                     var variant=catalog.Variant(id);int draws=SoundHaptics.DrawCount(variant);var choices=new List<Entry>();
                     foreach(int draw in new[]{SoundHaptics.RepresentativeDraw(variant)})
                     {
                         var playback=SoundHaptics.Realize(variant,draw,draws);
-                        if(Math.Abs(playback.PitchCents)>4800||playback.DelaySeconds>30)throw new InvalidDataException("Unbounded playback metadata");
                         var wave=SoundHaptics.Render(source,n.Family,playback);
                         if(wave.All(v=>Math.Abs(v)<.00001f))continue;
                         string hash=Convert.ToHexStringLower(SHA256.HashData(MemoryMarshal.AsBytes(wave.AsSpan())));
@@ -64,7 +68,7 @@ static class PreparedWaves
                     }
                     index[id]=choices.ToArray();
                 }
-                cache.Clear();Console.WriteLine("Prepared "+group.Key);
+                cache.Clear();sourceBytes=0;Console.WriteLine("Prepared "+group.Key);
             }
             var result=new Index(Files.Sha(Files.Bundled("catalog.json")),Renderer,index,Filter);
             File.WriteAllText(Files.Data("waves/index.json.tmp"),JsonSerializer.Serialize(result,Configuration.Json));
@@ -88,7 +92,7 @@ static class PreparedWaves
     }
     internal static void WriteWave(string path,float[] data)
     {
-        if(data.Length%2!=0||data.Any(v=>!float.IsFinite(v)))throw new InvalidDataException("Invalid samples");
+        if(data.Length>MaxWaveSamples||data.Length%2!=0||data.Any(v=>!float.IsFinite(v)))throw new InvalidDataException("Invalid samples");
         using var w=new BinaryWriter(File.Create(path));
         w.Write("RIFF"u8);w.Write(48+data.Length*4);w.Write("WAVEfmt "u8);w.Write(16);
         w.Write((ushort)3);w.Write((ushort)2);w.Write(48000);w.Write(384000);w.Write((ushort)8);w.Write((ushort)32);
@@ -96,7 +100,7 @@ static class PreparedWaves
     }
     internal static float[] ReadWave(string path,int length,string hash)
     {
-        if(length<0||length>48000*2*60||length%2!=0)throw new InvalidDataException("Invalid sample count");
+        if(length<0||length>MaxWaveSamples||length%2!=0)throw new InvalidDataException("Invalid sample count");
         using var stream=File.OpenRead(path);using var r=new BinaryReader(stream);
         bool Tag(string s)=>Encoding.ASCII.GetString(r.ReadBytes(4))==s;
         if(stream.Length!=56L+length*4L||!Tag("RIFF")||r.ReadInt32()!=48L+length*4L||!Tag("WAVE")||!Tag("fmt ")||r.ReadInt32()!=16||r.ReadUInt16()!=3||r.ReadUInt16()!=2||r.ReadInt32()!=48000||r.ReadInt32()!=384000||r.ReadUInt16()!=8||r.ReadUInt16()!=32||!Tag("fact")||r.ReadInt32()!=4||r.ReadInt32()!=length/2||!Tag("data")||r.ReadInt32()!=length*4L)throw new InvalidDataException("Invalid waveform");
