@@ -103,6 +103,8 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
         public long Group=group;
         public bool Confirmed;
         public SampleStore.Lease? Lease;
+        public bool SoftFootstep;
+        public FootstepFeedback Footstep;
     }
     readonly List<Voice> voices = [];
     // A bounded ring retains a stolen voice's next 20 ms instead of cutting it
@@ -118,7 +120,7 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
     long generation;
     public object Diagnostics { get { lock (gate) return new { voices = voices.Count, voice_steals = steals, limited_frames = limitedFrames }; } }
     public bool Playing { get { lock (gate) return voices.Count > 0 || retirementRemaining > 0; } }
-    public bool Play(string id, int delayFrames = 0, float level = 1, long group = 0, string emitter = "", int loops = 1, int loopStart = 0)
+    public bool Play(string id, int delayFrames = 0, float level = 1, long group = 0, string emitter = "", int loops = 1, int loopStart = 0, bool softFootstep = false)
     {
         long started;
         lock(gate)
@@ -144,7 +146,7 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
                 if(voices.Count(v=>v.Id==id)>=4)Retire(voices.FindIndex(v=>v.Id==id&&v.Loops==1),960,true);
                 if(voices.Count==32)Retire(voices.FindIndex(v=>v.Loops==1),960,true);
                 voices.Add(new(id,data,-Math.Max(0,delayFrames)*2,level,group,emitter,
-                    group==0?1:Math.Max(0,loops),Math.Clamp(loopStart*2,0,data.Length-2)){Lease=lease});
+                    group==0?1:Math.Max(0,loops),Math.Clamp(loopStart*2,0,data.Length-2)){Lease=lease,SoftFootstep=softFootstep});
                 lease=null;return true;
             }
         }
@@ -187,8 +189,10 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
         {
             float level = v.Level * (1 - f / (float)Math.Max(1, frames - 1));
             int p = ((retirementFrame + f) % 960) * 2;
-            retiring[p] += v.Data[v.Pos + f * 2] * level;
-            retiring[p + 1] += v.Data[v.Pos + f * 2 + 1] * level;
+            float left = v.Data[v.Pos + f * 2], right = v.Data[v.Pos + f * 2 + 1];
+            if (v.SoftFootstep) v.Footstep.Process(left, right, v.Pos / 2 + f, v.Data.Length / 2, out left, out right);
+            retiring[p] += left * level;
+            retiring[p + 1] += right * level;
         }
         retirementRemaining = Math.Max(retirementRemaining, frames);
     }
@@ -234,7 +238,24 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
                         v.Pos=v.LoopStart;
                     }
                     int n=Math.Min(frames-at,(v.Data.Length-v.Pos)/2);
-                    for(int f=0;f<n;f++){output[(at+f)*4+2]+=v.Data[v.Pos+f*2]*gain*v.Level;output[(at+f)*4+3]+=v.Data[v.Pos+f*2+1]*gain*v.Level;}
+                    if (v.SoftFootstep)
+                    {
+                        for (int f = 0; f < n; f++)
+                        {
+                            v.Footstep.Process(v.Data[v.Pos + f * 2], v.Data[v.Pos + f * 2 + 1],
+                                v.Pos / 2 + f, v.Data.Length / 2, out float left, out float right);
+                            output[(at + f) * 4 + 2] += left * gain * v.Level;
+                            output[(at + f) * 4 + 3] += right * gain * v.Level;
+                        }
+                    }
+                    else
+                    {
+                        for (int f = 0; f < n; f++)
+                        {
+                            output[(at + f) * 4 + 2] += v.Data[v.Pos + f * 2] * gain * v.Level;
+                            output[(at + f) * 4 + 3] += v.Data[v.Pos + f * 2 + 1] * gain * v.Level;
+                        }
+                    }
                     v.Pos+=n*2;at+=n;
                 }
                 if(v.Pos>=v.Data.Length && (!v.Confirmed || v.Loops==1))RemoveVoice(i);

@@ -69,7 +69,8 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
         // existing source-derived signal; ownership and omitted choices stay intact.
         float level=currentLevel*(node.Bank=="meat_damage_m.sbnk.1.x64"?damageGain:1);
         if(!mixer.Play(PreparedWaves.Key(entry),delay,level:level,group:currentLifetime,emitter:currentObject,
-            loops:node.LoopCount,loopStart:(int)Math.Round(entry.Playback.DelaySeconds*48000)))return;
+            loops:node.LoopCount,loopStart:(int)Math.Round(entry.Playback.DelaySeconds*48000),
+            softFootstep:FootstepFeedback.Applies(currentEvent,node.Bank)))return;
         Played++;
         if(recent.Count==64)recent.Dequeue();
         recent.Enqueue(new{event_id=currentEvent,frame=currentFrame,object_id=currentObject,lifetime=currentLifetime,

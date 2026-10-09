@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace DragonsDogma2DualSense;
 
-sealed record Configuration(string Game = "", float Gain = 1, bool AutoLaunchGame = true, bool RequireFocus = true, float DamageGain = 1)
+sealed record Configuration(string Game = "", float Gain = 1.25f, bool AutoLaunchGame = true, bool RequireFocus = true, float DamageGain = 1)
 {
     public static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower, WriteIndented = true };
     public static Configuration Read()
