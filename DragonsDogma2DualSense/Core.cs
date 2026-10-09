@@ -102,6 +102,7 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
         public float Level=level;
         public long Group=group;
         public bool Confirmed;
+        public SampleStore.Lease? Lease;
     }
     readonly List<Voice> voices = [];
     // A bounded ring retains a stolen voice's next 20 ms instead of cutting it
@@ -114,39 +115,61 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
     // 45 ms is a local tuning choice, not a measured ACE COMBAT parameter.
     static readonly float limiterRelease = (float)(1 - Math.Exp(-1 / (48000 * .045)));
     bool suspended;
+    long generation;
     public object Diagnostics { get { lock (gate) return new { voices = voices.Count, voice_steals = steals, limited_frames = limitedFrames }; } }
     public bool Playing { get { lock (gate) return voices.Count > 0 || retirementRemaining > 0; } }
     public bool Play(string id, int delayFrames = 0, float level = 1, long group = 0, string emitter = "", int loops = 1, int loopStart = 0)
     {
-        if (!samples.TryGetValue(id, out var data) || data.Length<2) return false;
-        lock (gate)
+        long started;
+        lock(gate)
         {
-            // Repeated game events are real strikes; IPC already deduplicates events.
-            // Allow their recorded tails to overlap, with bounded voice counts.
-            if (voices.Count(v => v.Id == id) >= 4)
+            if(suspended||!CanAdmit(id))return false;
+            started=generation;
+        }
+        SampleStore.Lease? lease=null;
+        try
+        {
+            float[] data;
+            if(samples is SampleStore store)
             {
-                int victim=voices.FindIndex(v=>v.Id==id && v.Loops==1);
-                if(victim<0)return false;
-                Retire(victim,960,true);
+                if(!store.TryAcquire(id,out lease))return false;
+                data=lease!.Data;
             }
-            if (voices.Count == 32)
+            else if(!samples.TryGetValue(id,out data!))return false;
+            if(data.Length<2)return false;
+            lock(gate)
             {
-                int victim=voices.FindIndex(v=>v.Loops==1);
-                if(victim<0)return false;
-                Retire(victim,960,true);
+                // Stop/suspension during a slow read cancels this event, not defers it.
+                if(started!=generation||suspended||!CanAdmit(id))return false;
+                if(voices.Count(v=>v.Id==id)>=4)Retire(voices.FindIndex(v=>v.Id==id&&v.Loops==1),960,true);
+                if(voices.Count==32)Retire(voices.FindIndex(v=>v.Loops==1),960,true);
+                voices.Add(new(id,data,-Math.Max(0,delayFrames)*2,level,group,emitter,
+                    group==0?1:Math.Max(0,loops),Math.Clamp(loopStart*2,0,data.Length-2)){Lease=lease});
+                lease=null;return true;
             }
-            voices.Add(new(id, data, -Math.Max(0, delayFrames) * 2, level, group, emitter,
-                group==0?1:Math.Max(0,loops),Math.Clamp(loopStart*2,0,data.Length-2))); return true;
+        }
+        finally{lease?.Dispose();}
+    }
+    bool CanAdmit(string id)=>(voices.Count(v=>v.Id==id)<4||voices.Any(v=>v.Id==id&&v.Loops==1))
+        &&(voices.Count<32||voices.Any(v=>v.Loops==1));
+    void RemoveVoice(int index)
+    {
+        voices[index].Lease?.Dispose();voices.RemoveAt(index);
+    }
+    public void Stop()
+    {
+        lock(gate)
+        {
+            generation++;for(int i=voices.Count-1;i>=0;i--)RemoveVoice(i);
+            Array.Clear(retiring);retirementRemaining=0;limiterGain=1;
         }
     }
-    public void Stop() { lock (gate) { voices.Clear(); Array.Clear(retiring); retirementRemaining = 0; limiterGain = 1; } }
     public void Suspend()
     {
         lock(gate)
         {
-            suspended=true;
-            limiterGain=1;
-            voices.RemoveAll(v=>v.Group==0 || v.Loops==1);
+            generation++;suspended=true;limiterGain=1;
+            for(int i=voices.Count-1;i>=0;i--)if(voices[i].Group==0||voices[i].Loops==1)RemoveVoice(i);
             Array.Clear(retiring);retirementRemaining=0;
         }
     }
@@ -156,6 +179,7 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
         var v = voices[index];
         voices.RemoveAt(index);
         if (stolen) steals++;
+        using var lease=v.Lease;
         if(suspended)return;
         if (v.Pos <= 0) return; // Unstarted voices have produced no samples yet.
         int frames = Math.Min(fadeFrames, (v.Data.Length - v.Pos) / 2);
@@ -213,7 +237,7 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
                     for(int f=0;f<n;f++){output[(at+f)*4+2]+=v.Data[v.Pos+f*2]*gain*v.Level;output[(at+f)*4+3]+=v.Data[v.Pos+f*2+1]*gain*v.Level;}
                     v.Pos+=n*2;at+=n;
                 }
-                if(v.Pos>=v.Data.Length && (!v.Confirmed || v.Loops==1))voices.RemoveAt(i);
+                if(v.Pos>=v.Data.Length && (!v.Confirmed || v.Loops==1))RemoveVoice(i);
             }
             for (int f = 0; f < frames; f++)
             {
