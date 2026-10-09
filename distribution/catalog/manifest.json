@@ -62,7 +62,13 @@
       "nodes/switchcntr-001.json",
       "nodes/unavailable-001.json",
       "nodes/unavailable-002.json",
-      "nodes/unavailable-003.json"
+      "nodes/unavailable-003.json",
+      "nodes/actionplay-tu4-001.json",
+      "nodes/actormixer-tu4-001.json",
+      "nodes/layercntr-tu4-001.json",
+      "nodes/ranseqcntr-tu4-001.json",
+      "nodes/sound-tu4-001.json",
+      "nodes/switchcntr-tu4-001.json"
     ],
     "events": [
       "events/events-001.json",
@@ -70,7 +76,8 @@
       "events/events-003.json",
       "events/events-004.json",
       "events/events-005.json",
-      "events/events-006.json"
+      "events/events-006.json",
+      "events/events-tu4-001.json"
     ],
     "nearby_events": [
       "nearby_events/nearby_events-001.json"
