@@ -10,6 +10,7 @@ local lifetime_recent={}
 local enabled, hooks_ready, suppressed = true, false, false
 local host, player_go, saved_device, saved_feedback = nil, nil, nil, nil
 local player_character
+local hybrid_device=nil
 local player_wait_reason=""
 local error_text, last_event = "", "none"
 local routes, id_method
@@ -102,8 +103,54 @@ local function device()
         if d and tostring(d:get_type_definition():get_full_name()):find("VendorNativeDualSenseDevice",1,true) then return d end
     end
 end
+-- Native HD takes precedence only with a companion that negotiates USB handoff.
+local native_hd_ids={[97291268]=true,[312821056]=true,[379474759]=true,[482704924]=true,[584489915]=true,[585869800]=true,[599479183]=true,[664812019]=true,[771805964]=true,[910631302]=true,[934905400]=true,[950605663]=true,[960962991]=true,[996203489]=true,[1079733981]=true,[1155592076]=true,[1163680941]=true,[1205658142]=true,[1529332519]=true,[1595888819]=true,[1600471081]=true,[1639119414]=true,[1762551309]=true,[1793781032]=true,[1993066807]=true,[2119695813]=true,[2146476090]=true,[2149414424]=true,[2186431642]=true,[2306059103]=true,[2338050813]=true,[2350094562]=true,[2510708406]=true,[2765774126]=true,[2793662280]=true,[2807786691]=true,[2818156234]=true,[2967536491]=true,[2975224248]=true,[3073055006]=true,[3175498239]=true,[3194912149]=true,[3246712375]=true,[3286509592]=true,[3287332762]=true,[3304840797]=true,[3335658832]=true,[3580780963]=true,[3595810265]=true,[3632479629]=true,[3641936838]=true,[3676160279]=true,[3757807074]=true,[3872226534]=true,[3923361188]=true,[3970730098]=true,[4019732542]=true,[4034308014]=true,[4131702128]=true,[4164574641]=true,[4240101446]=true,[4247356071]=true,[4287705698]=true,[4294684994]=true,[4294691792]=true}
+local native_hd_playing={}
+local native_hd_dirty=false
+local function native_hd_active() return next(native_hd_playing)~=nil end
+local function hybrid_usb()
+    return fresh() and host.native_hd_priority==true
+end
+local function native_hd_priority()
+    return hybrid_usb() and native_hd_active()
+end
+local function install_native_hd()
+    local function hook(name,params,pre)
+        local m=find_method("soundlib.SoundVibrationManager",name,params)
+        if not m then error("Native HD lifecycle method missing: "..name) end
+        sdk.hook(m,function(args)
+            local ok,why=pcall(pre,args)
+            if not ok then fail(why) end
+        end,function(ret)return ret end)
+    end
+    hook("registerPlayingInfo",{"System.UInt32","System.UInt32"},function(args)
+        local id,request=integer(args[3])&0xffffffff,integer(args[4])&0xffffffff
+        if native_hd_ids[id] and request~=0 and request~=0xffffffff then
+            native_hd_playing[request]=id;native_hd_dirty=true
+        end
+    end)
+    hook("unregisterPlayingInfo",{"System.UInt32"},function(args)
+        native_hd_playing[integer(args[3])&0xffffffff]=nil;native_hd_dirty=true
+    end)
+    hook("stopHDVib",{"System.UInt32"},function(args)
+        local id=integer(args[3])&0xffffffff
+        for request,trigger in pairs(native_hd_playing) do if trigger==id then native_hd_playing[request]=nil end end
+        native_hd_dirty=true
+    end)
+    hook("stopAll",{},function()native_hd_playing={};native_hd_dirty=true end)
+end
+
 local function update_suppression()
-    if not fresh() or not player_go then restore(); return end
+    if not fresh() or not player_go then hybrid_device=nil;restore(); return end
+    if hybrid_usb() then
+        -- USB HID sanitizing handles legacy rumble. Keep game PCM and its stop /
+        -- reset callbacks alive throughout HD playback and the return to custom.
+        if not restore() then return end
+        hybrid_device=device()
+        suppressed=hybrid_device~=nil -- Custom ownership; native HD stays enabled.
+        return
+    end
+    hybrid_device=nil
     local d = device()
     if not d then restore(); return end
     if saved_device and tostring(d)~=tostring(saved_device) and not restore() then return end
@@ -416,21 +463,52 @@ local function install()
     end))
     install_hit_provenance()
     local function suppress_void()
-        if fresh() and suppressed then return sdk.PreHookResult.SKIP_ORIGINAL end
+        if fresh() and suppressed and not hybrid_usb() then return sdk.PreHookResult.SKIP_ORIGINAL end
     end
-    hook_required("app.UserPadManager","requestVibration",{"app.UserPadDefine.RequestID","via.GameObject"},safe_pre(suppress_void))
+    -- Current installed request table: only 89..95 carry an HD name.
+    -- Keep their original dispatch so the game's HD timing/loop semantics survive.
+    local hd_request_ids={[89]=true,[90]=true,[91]=true,[92]=true,[93]=true,[94]=true,[95]=true}
+    local function block_regular()
+        counts.regular_requests_blocked=(counts.regular_requests_blocked or 0)+1
+        return sdk.PreHookResult.SKIP_ORIGINAL
+    end
+    hook_required("app.UserPadManager","requestVibration",{"app.UserPadDefine.RequestID","via.GameObject"},safe_pre(function(args)
+        if fresh() and suppressed then
+            if not hybrid_usb() or not hd_request_ids[integer(args[3])&0xffffffff] then return block_regular() end
+        end
+    end))
     hook_required("app.UserPadManager","requestVibrationHD",{"System.String","System.Boolean"},safe_pre(suppress_void))
-    hook_required("app.UserPadManager","requestVibration",{"app.VibrationPresetRequestData","via.GameObject"},safe_pre(function()
-        local skip=fresh() and suppressed
+    hook_required("app.UserPadManager","requestVibration",{"app.VibrationPresetRequestData","via.GameObject"},safe_pre(function(args)
+        local skip=false
+        if fresh() and suppressed then
+            skip=not hybrid_usb()
+            if not skip then
+                local data=sdk.to_managed_object(args[3])
+                local hd=data and data:get_field("RequestVibrationHD")
+                skip=type(hd)~="string" or hd==""
+            end
+        end
         thread.get_hook_storage().dd2_skip=skip
-        if skip then return sdk.PreHookResult.SKIP_ORIGINAL end
+        if skip then return block_regular() end
     end),function(ret)
         if thread.get_hook_storage().dd2_skip then return sdk.to_ptr(0) end
         return ret
     end)
     hook_required("via.hid.GamePadDevice","setMotorPower",{"via.hid.GamePadMotor","System.Single"},safe_pre(function(args)
         -- This wrapper also shifts the native receiver into RCX (slot 1).
-        if fresh() and suppressed and saved_device and sdk.is_managed_object(args[1]) and tostring(sdk.to_managed_object(args[1]))==tostring(saved_device) then return sdk.PreHookResult.SKIP_ORIGINAL end
+        if not fresh() or not suppressed then return end
+        local target=hybrid_usb() and hybrid_device or saved_device
+        if not target or not sdk.is_managed_object(args[1]) or tostring(sdk.to_managed_object(args[1]))~=tostring(target) then return end
+        counts.output_observed.setMotorPower=(counts.output_observed.setMotorPower or 0)+1
+        if hybrid_usb() then
+            -- Native wrapper: RCX=device, RDX=motor, XMM2=power (hook slot 3).
+            -- Zero only legacy motor power; execute the setter so zero/stop state
+            -- still reaches the game. HD PCM, resetMotors and feedback stay intact.
+            args[3]=sdk.to_ptr(0)
+            counts.output_blocked.setMotorPower=(counts.output_blocked.setMotorPower or 0)+1
+        else
+            return sdk.PreHookResult.SKIP_ORIGINAL
+        end
     end))
     -- These output-only APIs are present in the installed game's type metadata.
     -- A false ForceFeedbackEnable alone does not prove that its native device
@@ -441,7 +519,7 @@ local function install()
         if not method then return end
         sdk.hook(method,safe_pre(function(args)
             counts.output_observed[name]=(counts.output_observed[name] or 0)+1
-            if not fresh() or not suppressed or not saved_device then return end
+            if not fresh() or not suppressed or hybrid_usb() or not saved_device then return end
             if sdk.is_managed_object(args[receiver_slot]) and tostring(sdk.to_managed_object(args[receiver_slot]))==tostring(saved_device) then
                 counts.output_blocked[name]=(counts.output_blocked[name] or 0)+1
                 return sdk.PreHookResult.SKIP_ORIGINAL
@@ -461,6 +539,7 @@ local function install()
         counts.switch_updates=counts.switch_updates+1
     end),function(ret)return ret end) end
     counts.switch_hook=m~=nil
+    install_native_hd()
     hooks_ready=true
 end
 local ok,err=pcall(install);if not ok then fail(err) end
@@ -484,13 +563,14 @@ re.on_frame(function()
         update_suppression()
         local had_lifetimes=lifetime_count>0
         update_lifetimes()
-        if #events>0 or had_lifetimes or frame%15==1 then
+        if #events>0 or had_lifetimes or native_hd_dirty or frame%15==1 then
             snapshot=snapshot+1
             local result=json.dump_file(STATE,{version=2,session=session,seq=snapshot,frame=frame,events=events,
                 enabled=enabled,hooks_ready=hooks_ready,player_ready=player_go~=nil and next(owned_ids)~=nil,
-                suppressed=suppressed,error=error_text,player_wait_reason=player_wait_reason,counts=counts,last_event=last_event,recent=recent,
+                native_hd_active=native_hd_priority(),hybrid_usb=hybrid_usb()==true,suppressed=suppressed,error=error_text,player_wait_reason=player_wait_reason,counts=counts,last_event=last_event,recent=recent,
                 lifetimes=lifetime_snapshot(),lifetime_recent=lifetime_recent})
             if result~=true then error("IPC write failed") end
+            native_hd_dirty=false
         end
     end)
     if not ok then fail(err) end

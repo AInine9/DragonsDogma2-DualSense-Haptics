@@ -11,6 +11,7 @@ sealed class Dd2Inbox
     public bool Ready {get;private set;}
     public bool Player {get;private set;}
     public bool Suppressed {get;private set;}
+    public bool NativeHdActive {get;private set;}
     public IReadOnlyDictionary<long,bool> Lifetimes {get;private set;}=new Dictionary<long,bool>();
     public JsonNode[] Accept(JsonNode state,double now)
     {
@@ -40,7 +41,8 @@ sealed class Dd2Inbox
         }
         bool ready=state["enabled"]?.GetValue<bool>()==true&&state["hooks_ready"]?.GetValue<bool>()==true;
         bool player=state["player_ready"]?.GetValue<bool>()==true,suppressed=state["suppressed"]?.GetValue<bool>()==true;
-        Session=session;Snapshot=snapshot;Ack=next;Last=now;Ready=ready;Player=player;Suppressed=suppressed;Lifetimes=lifetimes;
+        bool nativeHd=state["native_hd_active"]?.GetValue<bool>()==true;
+        Session=session;Snapshot=snapshot;Ack=next;Last=now;Ready=ready;Player=player;Suppressed=suppressed;Lifetimes=lifetimes;NativeHdActive=nativeHd;
         return accepted.GroupBy(x=>x["seq"]!.GetValue<long>()).Select(g=>g.First()).ToArray();
     }
 }
@@ -115,6 +117,7 @@ static class Bridge
         var mixer=new Mixer(samples,config.Gain);var playback=new Playback(catalog,prepared,mixer,config.DamageGain);var inbox=new Dd2Inbox();var reader=new ChangedJsonReader();var lifetime=new GameLifetime();
         using var hid=new HidRecovery(()=>new Hid(),Files.Log);
         Audio? audio=null;BluetoothHaptics? bluetooth=null;string binding="",error="Waiting for controller";double nextDevice=0,nextControl=0,nextHealth=0,nextGame=0;
+        bool priorNativeHd=false;
         bool output=false,active=false;long received=0;string priorSession="";var playbackErrors=new PlaybackErrorLog();
         using var console=new ConsoleLifetime();
         using var nativeLease=new NativeAudioLease();
@@ -156,14 +159,20 @@ static class Bridge
                     {
                         var rows=inbox.Accept(state,now);
                         if(priorSession!=inbox.Session){mixer.Stop();priorSession=inbox.Session;}
-                        active=output&&inbox.Ready&&inbox.Player&&inbox.Suppressed&&(!config.RequireFocus||Focus.IsGame());
+                        if(priorNativeHd!=inbox.NativeHdActive)
+                        {
+                            Files.Log($"Native HD {(inbox.NativeHdActive?"started":"ended")}; custom playback {(inbox.NativeHdActive?"stopped":"eligible")}; snapshot={inbox.Snapshot}.");
+                            priorNativeHd=inbox.NativeHdActive;
+                        }
+                        if(inbox.NativeHdActive)mixer.Stop();
+                        active=!inbox.NativeHdActive&&output&&inbox.Ready&&inbox.Player&&inbox.Suppressed&&(!config.RequireFocus||Focus.IsGame());
                         if(active)
                         {
                             received+=PostActiveRows(mixer,playback,rows,inbox.Lifetimes,e=>playbackErrors.Report(e,now,Files.Log));
                         }
                         else mixer.SyncLifetimes(inbox.Lifetimes);
                     }
-                    active=output&&inbox.Ready&&inbox.Player&&inbox.Suppressed&&now-inbox.Last<1&&(!config.RequireFocus||Focus.IsGame());
+                    active=!inbox.NativeHdActive&&output&&inbox.Ready&&inbox.Player&&inbox.Suppressed&&now-inbox.Last<1&&(!config.RequireFocus||Focus.IsGame());
                     if(!inbox.Ready||!inbox.Player||now-inbox.Last>=1)mixer.Stop();
                     if(active)mixer.Resume();else mixer.Suspend();error=output?"":"Controller output unavailable";
                 }
@@ -177,10 +186,10 @@ static class Bridge
                 {
                     nextControl=now+.25;
                     bool ready=output&&inbox.Ready&&now-inbox.Last<1&&(!config.RequireFocus||Focus.IsGame());
-                    if(!Files.Atomic(control,new{version=2,session=inbox.Session,timestamp=DateTimeOffset.UtcNow.ToUnixTimeSeconds(),ready,ack=inbox.Ack,error,received,played=playback.Played}))
+                    if(!Files.Atomic(control,new{version=2,session=inbox.Session,timestamp=DateTimeOffset.UtcNow.ToUnixTimeSeconds(),ready,native_hd_priority=audio!=null,ack=inbox.Ack,error,received,played=playback.Played}))
                     {mixer.Stop();output=false;ready=false;error="Cannot write bridge control";}
                     nativeLease.Renew(ready&&audio!=null);
-                    Files.Atomic(Files.Data("status.json"),new{running=true,ready,active,session=inbox.Session,error,received,played=playback.Played,audio_underflows=audio?.Underflows??0,mixer=mixer.Diagnostics,recent_sounds=playback.Recent});
+                    Files.Atomic(Files.Data("status.json"),new{running=true,ready,active,native_hd_active=inbox.NativeHdActive,session=inbox.Session,error,received,played=playback.Played,audio_underflows=audio?.Underflows??0,mixer=mixer.Diagnostics,recent_sounds=playback.Recent});
                 }
                 Thread.Sleep(4);
             }

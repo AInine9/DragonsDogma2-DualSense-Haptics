@@ -1,9 +1,9 @@
 # Dragon's Dogma 2 DualSense Haptics
 
 An unofficial DualSense haptics mod for the PC version of Dragon's Dogma 2.
-It generates haptic files from your game's sound effects and plays them during supported actions.
+On USB, it gives priority to the game's native HD haptics. While native HD is playing, custom vibration pauses; otherwise, it plays haptics generated from your game's sound effects for supported actions.
 
-This mod does not reproduce the PS5's official haptic feedback. Adaptive triggers are not implemented.
+The game's ordinary rumble requests, including low-HP warnings, are suppressed while the mod is active. Native HD stop/reset handling is preserved. This does not establish full parity with the PS5 version. Adaptive triggers are not implemented.
 
 ## Requirements
 
@@ -40,10 +40,12 @@ The game launches through Steam by default. The mod also stops after the game cl
 
 Edit `config.json`, then restart the mod:
 
-- `gain` — Overall vibration strength, from `0.0` to `3.0`; default `1.25`. Existing explicit settings are preserved.
-- `damage_gain` — Additional strength for supported flesh-impact sounds, from `0.0` to `3.0`; default `1.0`. Does not add missing hit events. The output limiter still applies.
+- `gain` — Custom vibration strength, from `0.0` to `3.0`; default `1.25`. Existing explicit settings are preserved.
+- `damage_gain` — Additional strength for supported flesh-impact sounds, from `0.0` to `3.0`; default `1.0`. Does not add missing hit events. The custom output limiter still applies.
 - `auto_launch_game` — Set to `false` to launch the game yourself; default `true`.
 - `require_focus` — Pause vibration while another window is active; default `true`.
+
+Native HD uses the game's own strength; `gain` and `damage_gain` affect only custom vibration. Native HD priority is USB-only; Bluetooth keeps custom playback.
 
 ## Uninstall
 
