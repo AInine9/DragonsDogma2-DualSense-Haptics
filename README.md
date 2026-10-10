@@ -12,6 +12,7 @@ The game's ordinary rumble requests, including low-HP warnings, are suppressed w
 - A game-compatible version of [REFramework](https://github.com/praydog/REFramework).
 - For USB, keep the controller's audio device enabled in Windows.
 - Close other applications that control DualSense output.
+- Vibration must be enabled in the game’s controller settings.
 
 ## Install
 
