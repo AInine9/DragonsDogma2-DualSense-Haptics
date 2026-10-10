@@ -8,10 +8,10 @@ The game's ordinary rumble requests, including low-HP warnings, are suppressed w
 ## Requirements
 
 - Windows x64, Dragon's Dogma 2 on Steam, and one DualSense or DualSense Edge. USB is recommended; Bluetooth and Edge hardware support remain unverified for this mod.
-- [.NET 10 Runtime for Windows x64](https://dotnet.microsoft.com/download/dotnet/10.0). The SDK is not required for installation.
+- [.NET 10 Runtime for Windows x64](https://dotnet.microsoft.com/download/dotnet/10.0).
 - A game-compatible version of [REFramework](https://github.com/praydog/REFramework).
 - For USB, keep the controller's audio device enabled in Windows.
-- Close other applications that control DualSense output.
+- Steam Input must be Disabled.
 - Vibration must be enabled in the game’s controller settings.
 
 ## Install
