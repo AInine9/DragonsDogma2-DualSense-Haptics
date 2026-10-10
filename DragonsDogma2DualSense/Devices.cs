@@ -471,9 +471,20 @@ sealed class Audio : IDisposable
     public int Underflows => Volatile.Read(ref underflows);
     static void Check(int code) { if (code < 0) throw new InvalidOperationException($"PortAudio {code}: {Marshal.PtrToStringUTF8(Pa_GetErrorText(code))}"); }
     public double OutputLatency { get; private set; }
-    public static bool IsDualSenseOutputName(string name) =>
-        name.Contains("DualSense", StringComparison.OrdinalIgnoreCase)
-        || name.Equals("Wireless Controller", StringComparison.OrdinalIgnoreCase);
+    public static bool IsDualSenseOutputName(string name)
+    {
+        if (name.Contains("DualSense", StringComparison.OrdinalIgnoreCase)) return true;
+        // Windows can number the device and wrap it in a localized endpoint name,
+        // e.g. "Speakers (2 - Wireless Controller)". Keep the generic name exact
+        // within that wrapper so unrelated "Wireless Controller ..." names fail.
+        name = name.Trim();
+        int opening = name.IndexOf('(');
+        if (opening > 0 && name.EndsWith(')')) name = name[(opening + 1)..^1].Trim();
+        return System.Text.RegularExpressions.Regex.IsMatch(name,
+            @"\A(?:[0-9]+\s*-\s*)?Wireless Controller\z",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    }
     public static void Diagnose()
     {
         bool initialized = false;
