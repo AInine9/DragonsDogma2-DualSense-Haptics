@@ -58,14 +58,28 @@ static class BluetoothHapticsProtocol
         return report;
     }
 
+    // Precompute the eight polynomial steps for each possible byte.
+    static readonly uint[] CrcTable = CreateCrcTable();
+    static uint[] CreateCrcTable()
+    {
+        var table = new uint[256];
+        for (uint i = 0; i < table.Length; i++)
+        {
+            uint value = i;
+            for (int bit = 0; bit < 8; bit++)
+                value = (value & 1) != 0 ? (value >> 1) ^ 0xedb88320u : value >> 1;
+            table[i] = value;
+        }
+        return table;
+    }
+
     static void WriteCrc(byte[] report)
     {
         uint crc = ~0xeada2d49u;
         for (int i = 0; i <= 137; i++)
         {
             crc ^= report[i];
-            for (int bit = 0; bit < 8; bit++)
-                crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xedb88320u : crc >> 1;
+            crc = (crc >> 8) ^ CrcTable[crc & 0xff];
         }
         crc = ~crc;
         BinaryPrimitives.WriteUInt32LittleEndian(report.AsSpan(138, 4), crc);
