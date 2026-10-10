@@ -4,6 +4,8 @@ local STATE = "dd2_dualsense_state.json"
 local CONTROL = "dd2_dualsense_control.json"
 local session = tostring(os.time()) .. ":" .. tostring(os.clock())
 local frame, snapshot, event_seq = 0, 0, 0
+local published_event_seq, published_suppressed = 0, false
+local published_frame=0
 local events, owned_ids, switches, states = {}, {}, {}, {}
 local lifetimes, lifetime_count, playing_method = {}, 0, nil
 local lifetime_recent={}
@@ -23,6 +25,16 @@ local function forget_nearby(id)
         nearby_count=nearby_count-1
     end
 end
+local function update_nearby(id,x,y,z,at)
+    if x==nil then forget_nearby(id);return end
+    local p=nearby_positions[id]
+    if not p then
+        if nearby_count>=512 then return end
+        p={};nearby_positions[id]=p;nearby_count=nearby_count+1
+    end
+    -- Keep every coordinate read fresh, but reuse the row for a registered ID.
+    p.x,p.y,p.z,p.frame=x,y,z,at
+end
 local function sound_position(go)
     local t=go and go:call("get_Transform")
     local p=t and t:call("get_Position")
@@ -30,7 +42,7 @@ local function sound_position(go)
     local x,y,z=p.x,p.y,p.z
     if type(x)~="number" or type(y)~="number" or type(z)~="number" then return nil end
     if x~=x or y~=y or z~=z or math.abs(x)>1000000 or math.abs(y)>1000000 or math.abs(z)>1000000 then return nil end
-    return {x=x,y=y,z=z,frame=frame}
+    return x,y,z
 end
 local function nearby_level(id,object)
     local rule=routes and routes.nearby_events and routes.nearby_events[tostring(id)]
@@ -38,9 +50,10 @@ local function nearby_level(id,object)
     if not rule or not p or frame-p.frame>2 then return nil end
     if type(rule.radius)~="number" or rule.radius~=rule.radius or rule.radius<=5 or rule.radius>100
         or type(rule.gain)~="number" or rule.gain~=rule.gain or rule.gain<=0 or rule.gain>1.5 then return nil end
-    local ok,q=pcall(sound_position,player_go)
-    if not ok or not q then return nil end
-    local distance=math.sqrt((p.x-q.x)^2+(p.y-q.y)^2+(p.z-q.z)^2)
+    local px,py,pz=p.x,p.y,p.z -- Preserve this sample across the player's SDK calls.
+    local ok,x,y,z=pcall(sound_position,player_go)
+    if not ok or x==nil then return nil end
+    local distance=math.sqrt((px-x)^2+(py-y)^2+(pz-z)^2)
     if distance>=rule.radius then return nil end
     return rule.gain*(1-math.max(0,distance-5)/(rule.radius-5))^2
 end
@@ -130,14 +143,18 @@ local function install_native_hd()
         end
     end)
     hook("unregisterPlayingInfo",{"System.UInt32"},function(args)
-        native_hd_playing[integer(args[3])&0xffffffff]=nil;native_hd_dirty=true
+        local request=integer(args[3])&0xffffffff
+        if native_hd_playing[request] then native_hd_playing[request]=nil;native_hd_dirty=true end
     end)
     hook("stopHDVib",{"System.UInt32"},function(args)
         local id=integer(args[3])&0xffffffff
-        for request,trigger in pairs(native_hd_playing) do if trigger==id then native_hd_playing[request]=nil end end
-        native_hd_dirty=true
+        for request,trigger in pairs(native_hd_playing) do
+            if trigger==id then native_hd_playing[request]=nil;native_hd_dirty=true end
+        end
     end)
-    hook("stopAll",{},function()native_hd_playing={};native_hd_dirty=true end)
+    hook("stopAll",{},function()
+        if next(native_hd_playing) then native_hd_playing={};native_hd_dirty=true end
+    end)
 end
 
 local function update_suppression()
@@ -158,8 +175,12 @@ local function update_suppression()
     if type(saved_feedback)~="boolean" then saved_device=nil;error("Unconfirmed feedback state") end
     -- Repeated setters may reset the engine's device output mode every frame.
     -- Like Onimusha, only write when the observed value actually changes.
-    if d:call("get_ForceFeedbackEnable")~=false then d:call("set_ForceFeedbackEnable",false) end
-    suppressed=d:call("get_ForceFeedbackEnable")==false
+    local feedback=d:call("get_ForceFeedbackEnable")
+    if feedback~=false then
+        d:call("set_ForceFeedbackEnable",false)
+        feedback=d:call("get_ForceFeedbackEnable")
+    end
+    suppressed=feedback==false
     if not suppressed then error("Native suppression readback failed") end
 end
 local function in_player_hierarchy(go)
@@ -195,7 +216,14 @@ local function ownership_accessors(t)
     end
     owner_accessors[name]=result;return result
 end
+local function remember_owner(key,owned)
+    if owner_cache_count>=256 and not owner_cache[key] then owner_cache={};owner_cache_count=0 end
+    if not owner_cache[key] then owner_cache_count=owner_cache_count+1 end
+    owner_cache[key]={owned=owned,until_frame=frame+15}
+    return owned
+end
 local function owns(go)
+    -- Parent changes must be visible immediately, even with a cached owner result.
     if in_player_hierarchy(go) then return true end
     if not go or not player_go then return false end
     local key=tostring(go)
@@ -235,9 +263,7 @@ local function owns(go)
         end
         return false
     end)
-    if owner_cache_count>=256 then owner_cache={};owner_cache_count=0 end
-    owner_cache[key]={owned=ok and result==true,until_frame=frame+15};owner_cache_count=owner_cache_count+1
-    return ok and result==true
+    return remember_owner(key,ok and result==true)
 end
 local function update_player()
     -- Returning to the title destroys the component before ManualPlayer is
@@ -263,7 +289,9 @@ local function update_player()
     if id and id~=0 then owned_ids[tostring(id)]=true end
 end
 local function copy(t)
-    local r={};for k,v in pairs(t or {}) do r[k]=v end;return r
+    local r={}
+    if t then for k,v in pairs(t) do r[k]=v end end
+    return r
 end
 local function emit(id, object, request)
     if not enabled or not hooks_ready or not player_go then return end
@@ -296,7 +324,8 @@ end
 local function update_lifetimes()
     -- Keep observing already-started requests across focus/device interruptions.
     -- Output is gated independently; ended requests must not resume afterwards.
-    if not enabled or not player_go then lifetimes={};lifetime_count=0;return end
+    if not enabled or not player_go then local changed=lifetime_count>0;lifetimes={};lifetime_count=0;return changed end
+    local changed=false
     for token,row in pairs(lifetimes) do
         local playing=playing_method:call(nil,row.request)
         -- Request IDs exist before the audio thread assigns a playing ID.
@@ -307,13 +336,24 @@ local function update_lifetimes()
             lifetime_recent[#lifetime_recent+1]={token=token,id=row.id,request=row.request,playing=row.playing,frames=frame-row.frame}
             if #lifetime_recent>32 then table.remove(lifetime_recent,1) end
             lifetimes[token]=nil;lifetime_count=lifetime_count-1
-        elseif playing~=0 then row.playing=playing end
+            changed=true
+        elseif playing~=0 and row.playing~=playing then row.playing=playing;changed=true end
     end
+    return changed
 end
+local snapshot_rows={}
 local function lifetime_snapshot()
-    local rows={}
-    for _,row in pairs(lifetimes) do rows[#rows+1]={token=row.token,confirmed=row.playing~=0,request=row.request,playing=row.playing,id=row.id} end
-    return rows
+    -- json.dump_file consumes these rows synchronously; no queued event owns them.
+    -- Refresh every field and discard ended rows rather than caching lifetime state.
+    local count=0
+    for _,row in pairs(lifetimes) do
+        count=count+1
+        local result=snapshot_rows[count]
+        if not result then result={};snapshot_rows[count]=result end
+        result.token,result.confirmed,result.request,result.playing,result.id=row.token,row.playing~=0,row.request,row.playing,row.id
+    end
+    for i=#snapshot_rows,count+1,-1 do snapshot_rows[i]=nil end
+    return snapshot_rows
 end
 local function hook_required(typename,name,types,pre,post)
     local m=find_method(typename,name,types)
@@ -425,26 +465,27 @@ local function install()
         local storage=thread.get_hook_storage()
         storage.dd2_owned=false
         storage.dd2_owner_known=false
-        storage.dd2_nearby_position=nil
+        storage.dd2_nearby_x=nil
         if sdk.is_managed_object(args[1]) then
             -- A transient/destroyed emitter is simply not attributable. Never
             -- latch all hooks off because one component is being unloaded.
-            local ok,owned=pcall(owns,sdk.to_managed_object(args[1]))
+            local object=sdk.to_managed_object(args[1])
+            local ok,owned=pcall(owns,object)
             storage.dd2_owned=ok and owned==true
             storage.dd2_owner_known=ok
             if ok and not owned and routes.nearby_events then
-                local positioned,p=pcall(sound_position,sdk.to_managed_object(args[1]))
-                if positioned then storage.dd2_nearby_position=p end
+                local positioned,x,y,z=pcall(sound_position,object)
+                if positioned then
+                    storage.dd2_nearby_x,storage.dd2_nearby_y,storage.dd2_nearby_z=x,y,z
+                    storage.dd2_nearby_frame=frame
+                end
             end
         end
     end),function(ret)
         local ok,err=pcall(function()
             local storage=thread.get_hook_storage()
             local id=tostring(integer(ret))
-            forget_nearby(id)
-            if storage.dd2_nearby_position and nearby_count<512 then
-                nearby_positions[id]=storage.dd2_nearby_position;nearby_count=nearby_count+1
-            end
+            update_nearby(id,storage.dd2_nearby_x,storage.dd2_nearby_y,storage.dd2_nearby_z,storage.dd2_nearby_frame)
             if storage.dd2_owned then owned_ids[id]=true
             elseif storage.dd2_owner_known then owned_ids[id]=nil;if not nearby_positions[id] then switches[id]=nil end end
         end)
@@ -555,21 +596,27 @@ re.on_frame(function()
             end
             local loaded,value=pcall(json.load_file,CONTROL);host=loaded and value or nil
             if type(host)~="table" then host=nil end
-            if host and host.session==session and type(host.ack)=="number" then
+            if #events>0 and host and host.session==session and type(host.ack)=="number" then
                 local keep={};for _,e in ipairs(events) do if e.seq>host.ack then keep[#keep+1]=e end end;events=keep
             end
             update_player()
         end
         update_suppression()
-        local had_lifetimes=lifetime_count>0
-        update_lifetimes()
-        if #events>0 or had_lifetimes or native_hd_dirty or frame%15==1 then
+        local lifetimes_changed=update_lifetimes()
+        -- Keep unacknowledged events in each heartbeat for retry, but do not
+        -- rewrite identical queued events / live loops on every rendered frame.
+        -- Retry within the inbox's eight-frame acceptance window if a file
+        -- read was missed; the slower heartbeat alone would be too late.
+        local retry=#events>0 and frame-published_frame>=4
+        if event_seq~=published_event_seq or retry or lifetimes_changed or suppressed~=published_suppressed or native_hd_dirty or frame%15==1 then
             snapshot=snapshot+1
             local result=json.dump_file(STATE,{version=2,session=session,seq=snapshot,frame=frame,events=events,
                 enabled=enabled,hooks_ready=hooks_ready,player_ready=player_go~=nil and next(owned_ids)~=nil,
                 native_hd_active=native_hd_priority(),hybrid_usb=hybrid_usb()==true,suppressed=suppressed,error=error_text,player_wait_reason=player_wait_reason,counts=counts,last_event=last_event,recent=recent,
-                lifetimes=lifetime_snapshot(),lifetime_recent=lifetime_recent})
+                lifetimes=lifetime_snapshot(),lifetime_recent=lifetime_recent},-1)
             if result~=true then error("IPC write failed") end
+            published_event_seq=event_seq;published_suppressed=suppressed
+            published_frame=frame
             native_hd_dirty=false
         end
     end)
