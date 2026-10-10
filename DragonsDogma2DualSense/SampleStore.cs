@@ -76,9 +76,16 @@ sealed class SampleStore(long budgetBytes = 64L * 1024 * 1024, long totalBudgetB
             }
             Interlocked.Increment(ref entry.Users);
             lease=new Lease(entry);
-            if(entry.Node!=null)recent.Remove(entry.Node);
-            else{detached.Remove(entry);bytes+=entry.Bytes;}
-            entry.Node=recent.AddLast(entry);
+            if(entry.Node!=null)
+            {
+                recent.Remove(entry.Node);
+                recent.AddLast(entry.Node);
+            }
+            else
+            {
+                detached.Remove(entry);bytes+=entry.Bytes;
+                entry.Node=recent.AddLast(entry);
+            }
             while(bytes>budget&&recent.Count>0)Evict();
             return true;
         }
