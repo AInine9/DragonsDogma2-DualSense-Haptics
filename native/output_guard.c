@@ -23,6 +23,15 @@ static _Atomic(uintptr_t) lease_pointer;
 static HANDLE lease_mapping;
 typedef struct {HANDLE handle;LPOVERLAPPED ov;void *bytes;uint64_t token;} Pending;
 static Pending pending[256];
+#ifdef OBSERVER_TEST
+static unsigned pending_searches;
+#endif
+// A cheap negative filter keeps unrelated game I/O completions off the lock.
+// Counts (rather than bits) preserve entries that hash to the same bucket.
+static _Atomic(unsigned) pending_buckets[64];
+static unsigned pending_bucket(HANDLE h,LPOVERLAPPED ov) {
+    return (unsigned)(((uintptr_t)h>>2)^((uintptr_t)ov>>4))&63;
+}
 static uint64_t next_token,rewritten,pending_full;
 static bool lease_valid(uint64_t deadline,uint64_t now) {return deadline>now && deadline-now<=2000;}
 static bool leased(void) {
@@ -35,6 +44,9 @@ static void sanitize(unsigned char *bytes) {
     bytes[1]&=(unsigned char)~3;bytes[39]&=(unsigned char)~4;
     bytes[3]=0;bytes[4]=0;
 }
+static bool needs_sanitize(const unsigned char *bytes) {
+    return (bytes[1]&3)||(bytes[39]&4)||bytes[3]||bytes[4];
+}
 static SRWLOCK lock=SRWLOCK_INIT;
 typedef struct { unsigned api,length; unsigned char bytes[64]; uint64_t calls,accepted; uintptr_t caller; } Sample;
 static Sample samples[64];
@@ -43,6 +55,7 @@ static uint64_t dropped;
 static wchar_t destination[MAX_PATH],temporary[MAX_PATH];
 static LONG initialized;
 static _Thread_local bool inside;
+static bool diagnostics;
 
 static uint64_t retain(HANDLE handle,LPOVERLAPPED ov,const unsigned char *bytes,unsigned n,void **buffer) {
     void *copy=HeapAlloc(GetProcessHeap(),0,n);if(!copy)return 0;memcpy(copy,bytes,n);
@@ -50,12 +63,18 @@ static uint64_t retain(HANDLE handle,LPOVERLAPPED ov,const unsigned char *bytes,
     unsigned i;for(i=0;i<256;i++)if(!pending[i].bytes)break;
     if(i==256){pending_full++;ReleaseSRWLockExclusive(&lock);HeapFree(GetProcessHeap(),0,copy);return 0;}
     uint64_t token=++next_token;pending[i]=(Pending){handle,ov,copy,token};
+    atomic_fetch_add(&pending_buckets[pending_bucket(handle,ov)],1);
     ReleaseSRWLockExclusive(&lock);*buffer=copy;return token;
 }
 static void release_pending(HANDLE handle,LPOVERLAPPED ov,uint64_t token) {
+    if(!atomic_load(&pending_buckets[pending_bucket(handle,ov)]))return;
+#ifdef OBSERVER_TEST
+    pending_searches++;
+#endif
     void *buffer=NULL;AcquireSRWLockExclusive(&lock);
     for(unsigned i=0;i<256;i++)if(pending[i].bytes && pending[i].handle==handle && pending[i].ov==ov && (!token||pending[i].token==token)) {
-        buffer=pending[i].bytes;pending[i]=(Pending){0};break;
+        buffer=pending[i].bytes;pending[i]=(Pending){0};
+        atomic_fetch_sub(&pending_buckets[pending_bucket(handle,ov)],1);break;
     }
     ReleaseSRWLockExclusive(&lock);if(buffer)HeapFree(GetProcessHeap(),0,buffer);
 }
@@ -102,32 +121,36 @@ static void record(unsigned api,const unsigned char *bytes,unsigned length,uintp
 static BOOL WINAPI observe_write(HANDLE h,LPCVOID b,DWORD n,LPDWORD written,LPOVERLAPPED ov) {
     if(inside)return original_write(h,b,n,written,ov);
     DWORD before=GetLastError();inside=true;
-    unsigned char copy[64];bool match=copy_report(b,n,copy) && sony_handle(h);
+    bool active=leased();
+    if(!active&&!diagnostics){inside=false;SetLastError(before);return original_write(h,b,n,written,ov);}
+    unsigned char copy[64];bool match=copy_report(b,n,copy) && (diagnostics||needs_sanitize(copy)) && sony_handle(h);
     unsigned char changed[64];const void *send=b;uint64_t token=0;
-    if(match&&leased()) {
+    if(match&&active) {
         memcpy(changed,copy,n);sanitize(changed);
         if(ov) {void *held=NULL;token=retain(h,ov,changed,n,&held);if(token)send=held;}
         else send=changed;
-        if(send!=b){AcquireSRWLockExclusive(&lock);rewritten++;ReleaseSRWLockExclusive(&lock);}
+        if(send!=b&&diagnostics){AcquireSRWLockExclusive(&lock);rewritten++;ReleaseSRWLockExclusive(&lock);}
     }
     SetLastError(before);
     BOOL result=original_write(h,send,n,written,ov);DWORD after=GetLastError();
     if(token&&(result||after!=ERROR_IO_PENDING))release_pending(h,ov,token);
-    if(match)record(1,copy,n,(uintptr_t)__builtin_return_address(0),result || after==ERROR_IO_PENDING);
+    if(match&&diagnostics)record(1,copy,n,(uintptr_t)__builtin_return_address(0),result || after==ERROR_IO_PENDING);
     inside=false;SetLastError(after);return result;
 }
 static BOOLEAN WINAPI observe_output(HANDLE h,PVOID b,ULONG n) {
     if(inside)return original_output(h,b,n);
     DWORD before=GetLastError();inside=true;
-    unsigned char copy[64];bool match=copy_report(b,n,copy) && sony_handle(h);
+    bool active=leased();
+    if(!active&&!diagnostics){inside=false;SetLastError(before);return original_output(h,b,n);}
+    unsigned char copy[64];bool match=copy_report(b,n,copy) && (diagnostics||needs_sanitize(copy)) && sony_handle(h);
     unsigned char changed[64];void *send=b;
-    if(match&&leased()) {
+    if(match&&active) {
         memcpy(changed,copy,n);sanitize(changed);send=changed;
-        AcquireSRWLockExclusive(&lock);rewritten++;ReleaseSRWLockExclusive(&lock);
+        if(diagnostics){AcquireSRWLockExclusive(&lock);rewritten++;ReleaseSRWLockExclusive(&lock);}
     }
     SetLastError(before);
     BOOLEAN result=original_output(h,send,n);DWORD after=GetLastError();
-    if(match)record(2,copy,n,(uintptr_t)__builtin_return_address(0),result!=0);
+    if(match&&diagnostics)record(2,copy,n,(uintptr_t)__builtin_return_address(0),result!=0);
     inside=false;SetLastError(after);return result;
 }
 static void snapshot(void) {
@@ -164,7 +187,7 @@ static DWORD WINAPI writer(void *unused) {
                 else {CloseHandle(lease_mapping);lease_mapping=NULL;}
             }
         }
-        snapshot();Sleep(200);
+        if(diagnostics)snapshot();Sleep(200);
     }
     return 0;
 }
@@ -175,6 +198,10 @@ __declspec(dllexport) bool reframework_plugin_initialize(const void *unused) {
     if(!n||n>=MAX_PATH)return false;
     wchar_t *last=wcsrchr(exe,L'\\');if(!last||_wcsicmp(last+1,L"DD2.exe"))return false;
     *last=0;
+    // Explicit opt-in, checked once at startup; normal play never writes traces.
+    wchar_t diagnostic_flag[MAX_PATH];
+    if(swprintf(diagnostic_flag,MAX_PATH,L"%ls\\reframework\\data\\dd2_output_diagnostics.enabled",exe)<0)return false;
+    diagnostics=GetFileAttributesW(diagnostic_flag)!=INVALID_FILE_ATTRIBUTES;
     if(swprintf(destination,MAX_PATH,L"%ls\\reframework\\data\\dd2_output_reports.json",exe)<0)return false;
     if(swprintf(temporary,MAX_PATH,L"%ls.tmp",destination)<0)return false;
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),hid=LoadLibraryW(L"hid.dll");

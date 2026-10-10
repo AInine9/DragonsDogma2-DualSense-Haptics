@@ -17,6 +17,10 @@ A prebuilt native audio guard is included. To rebuild it with Zig 0.15.2:
 
 The guard's source and its MinHook dependency are in `native`.
 
+Native output tracing is disabled by default. For diagnostics, create
+`reframework/data/dd2_output_diagnostics.enabled` in the game folder before
+starting the game. Remove the marker and restart the game to disable tracing.
+
 The catalog contains routing metadata and source hashes, not sound recordings. Run the packaged `Setup.cmd` against your own game installation to generate haptic data.
 
 Catalog sources live in `distribution/catalog/`. `manifest.json` lists the parts
