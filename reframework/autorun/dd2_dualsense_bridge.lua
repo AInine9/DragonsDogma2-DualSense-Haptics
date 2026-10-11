@@ -59,6 +59,14 @@ local function nearby_level(id,object)
 end
 local hit_controllers, hit_scheduled, hit_requests = {}, {}, {}
 local hit_controller_count, hit_scheduled_count, hit_request_count = 0, 0, 0
+local elemental_sources={}
+local enchant_events={}
+local elemental_source_count=0
+local element_probe_cache,element_probe_frame,element_probe_count={},-1,0
+local function forget_element(id)
+    if elemental_sources[id] then elemental_sources[id]=nil;elemental_source_count=elemental_source_count-1 end
+end
+local element_names={[1]="fire",[2]="ice",[3]="thunder",[4]="light",[5]="dark"}
 local function observe(id, object, result)
     local last=recent[#recent]
     if last and last.id==id and last.object==object and last.result==result then
@@ -284,9 +292,58 @@ local function update_player()
         lifetimes={};lifetime_count=0
         hit_controllers={};hit_scheduled={};hit_requests={}
         hit_controller_count=0;hit_scheduled_count=0;hit_request_count=0
+        elemental_sources={}
+        elemental_source_count=0;element_probe_cache={};element_probe_count=0
     end
     player_go=go;player_character=player
     if id and id~=0 then owned_ids[tostring(id)]=true end
+end
+local function is_type(value,name)
+    if not value then return false end
+    local t=value:get_type_definition()
+    for _=1,8 do
+        if not t then return false end
+        if t:get_full_name()==name then return true end
+        t=t:get_parent_type()
+    end
+    return false
+end
+local function shell_element(go)
+    -- Called only for a confirmed player-owned emitter. Never inspect enemy
+    -- attacks, or infer spell element from the player's equipped weapon.
+    if not go or tostring(go)==tostring(player_go) then return nil end
+    for _=1,4 do
+        local components=go:call("get_Components")
+        if components then
+            for index,c in ipairs(components:get_elements()) do
+                if index>32 then return nil end
+                if is_type(c,"app.Shell") then
+                    local enchanted=element_names[c:call("get_EnchantElementType")]
+                    if enchanted then return enchanted end
+                    local hit=c:call("get_HitCtrl")
+                    local attacks=hit and hit:get_field("AttackList")
+                    local count=attacks and attacks:call("get_Count") or 0
+                    if count<1 or count>16 then return nil end
+                    local result
+                    for i=0,count-1 do
+                        local info=attacks:call("get_Item(System.Int32)",i)
+                        local data=info and info:call("get_AttackUserData")
+                        local element=data and element_names[data:call("get_ElementTypeProp")]
+                        if not element and data then element=element_names[data:call("get_NonMagicElementType")] end
+                        if element then
+                            if result and result~=element then return nil end
+                            result=element
+                        end
+                    end
+                    return result
+                end
+            end
+        end
+        local transform=go:call("get_Transform")
+        local parent=transform and transform:call("get_Parent")
+        go=parent and parent:call("get_GameObject")
+        if not go or tostring(go)==tostring(player_go) then return nil end
+    end
 end
 local function copy(t)
     local r={}
@@ -301,7 +358,23 @@ local function emit(id, object, request)
     -- Never promote an enemy emitter to general player ownership.
     local pending=request and hit_requests[request]
     if request then hit_requests[request]=nil end
-    local outgoing=id==1701720996 and pending and frame<=pending.until_frame
+    local outgoing=pending and pending.allowed and id==pending.event and frame<=pending.until_frame
+    local attack_element=outgoing and pending.element or nil
+    local source=elemental_sources[object]
+    if not attack_element and owned_ids[object] and source and frame-source.frame<=2 then attack_element=source.element end
+    local weapon_sound=false
+    -- Live weapon audio can bypass getEnchantTriggerId. Match the actual
+    -- enchant sound to an already queued, player-owned weapon sound on this
+    -- exact emitter and frame. A target's damage request cannot use this path.
+    if not attack_element and not pending and owned_ids[object] and enchant_events[id] and routes.weapon_events then
+        for i=#events,math.max(1,#events-15),-1 do
+            local prior=events[i]
+            if prior.frame<frame then break end
+            if prior.frame==frame and prior.object==object and routes.weapon_events[tostring(prior.id)] then
+                attack_element=enchant_events[id];weapon_sound=true;break
+            end
+        end
+    end
     local level=1
     if not owned_ids[object] and not outgoing then
         level=nearby_level(id,object)
@@ -317,7 +390,12 @@ local function emit(id, object, request)
         lifetimes[token]={token=token,request=request,playing=0,frame=frame,id=id,object=object}
         lifetime_count=lifetime_count+1
     end
-    events[#events+1]={seq=event_seq,frame=frame,id=id,object=object,lifetime=token,level=level,switches=copy(switches[object]),states=copy(states)}
+    events[#events+1]={seq=event_seq,frame=frame,id=id,object=object,lifetime=token,level=level,attack_element=attack_element,switches=copy(switches[object]),states=copy(states)}
+    if attack_element then
+        counts.elemental_events=(counts.elemental_events or 0)+1
+        counts.elemental_last={id=id,element=attack_element,frame=frame,origin=outgoing and "request" or weapon_sound and "weapon_sound" or "shell"}
+        if weapon_sound then counts.elemental_weapon_sounds=(counts.elemental_weapon_sounds or 0)+1 end
+    end
     if #events>128 then table.remove(events,1);counts.dropped=counts.dropped+1 end
     last_event=tostring(id)
 end
@@ -404,9 +482,12 @@ local function install_hit_provenance()
         local attacker=info:call("get_AttackOwnerObject")
         local melee=info:get_field("IsShootAttack")==false and info:get_field("IsMagicAttack")==false
             and (info:get_field("IsSlashAttack")==true or info:get_field("IsBlowAttack")==true)
-        local allowed=melee and player_go~=nil and attacker~=nil and in_player_hierarchy(attacker)
+        local player_attack=player_go~=nil and attacker~=nil and owns(attacker)
+        local allowed=melee and player_attack and in_player_hierarchy(attacker)
         if hit_controller_count>=256 then hit_controllers={};hit_controller_count=0 end
-        hit_controllers[key]={allowed=allowed,until_frame=frame+2}
+        local element
+        if player_attack then local ok,value=pcall(function()return info:call("get_ElementType")end);if ok then element=element_names[value] end end
+        hit_controllers[key]={allowed=allowed,player_attack=player_attack,element=element,until_frame=frame+2}
         hit_controller_count=hit_controller_count+1
     end),unchanged)
     sdk.hook(trigger,guarded(function(args)
@@ -422,12 +503,56 @@ local function install_hit_provenance()
         local allowed=row~=nil and row.allowed and frame<=row.until_frame
             and not (prior~=nil and frame<=prior.until_frame)
         if hit_scheduled_count>=512 then hit_scheduled={};hit_scheduled_count=0 end
-        hit_scheduled[key]={allowed=allowed,until_frame=frame+2}
+        hit_scheduled[key]={allowed=allowed,event=1701720996,element=allowed and row.element or nil,until_frame=frame+2}
         hit_scheduled_count=hit_scheduled_count+1
     end),unchanged)
     sdk.hook(clear,guarded(function(args)
         local o=receiver(args);if o then hit_controllers[tostring(o)]=nil end
     end),unchanged)
+    local function schedule_element(container,trigger_id,allowed)
+        local rule=routes.elemental_triggers and routes.elemental_triggers[tostring(trigger_id)]
+        if not container or not rule then return end
+        local key=tostring(container)..":"..tostring(trigger_id)
+        local prior=hit_scheduled[key]
+        if hit_scheduled_count>=512 then hit_scheduled={};hit_scheduled_count=0 end
+        hit_scheduled[key]={allowed=allowed and not (prior and frame<=prior.until_frame),event=rule.event,element=rule.element,until_frame=frame+2}
+        hit_scheduled_count=hit_scheduled_count+1
+    end
+    -- The actual attribute-hit trigger can differ from TriggerId. Capture its
+    -- exact container and ID, retaining the attacker's provenance across jobs.
+    local elemental_hit=find_method("app.WwiseDamageController","trigger",{"app.WwiseContainerApp","System.UInt32","via.vec3"})
+    if elemental_hit then sdk.hook(elemental_hit,guarded(function(args)
+        local o,slot=receiver(args);if not o then return end
+        local row=hit_controllers[tostring(o)]
+        schedule_element(typed(args[slot+1],"app.WwiseContainerApp"),integer(args[slot+2])&0xffffffff,
+            row~=nil and row.player_attack and frame<=row.until_frame)
+    end),unchanged) end
+    -- This getter is only queried by the game's weapon sound path. Its return
+    -- selects the real enchant swoosh; no idle timer or synthetic pulse is added.
+    local enchant=find_method("app.WwiseCharacter","getEnchantTriggerId",{"app.WwiseWeaponRequestData.EquipPartsType","app.SoundDefine.WwiseEnchantSizeType"})
+    if enchant then sdk.hook(enchant,function(args)
+        local storage=thread.get_hook_storage();storage.dd2_enchant_character=nil
+        guarded(function()
+            local o=typed(args[1],"app.WwiseCharacter") or typed(args[2],"app.WwiseCharacter")
+            if o and player_character and tostring(o:call("get__CachedCharacter"))==tostring(player_character) then storage.dd2_enchant_character=o end
+        end)()
+    end,function(ret)
+        pcall(function()
+            local o=thread.get_hook_storage().dd2_enchant_character
+            thread.get_hook_storage().dd2_enchant_character=nil
+            if not o then return end
+            local id=integer(ret)&0xffffffff
+            if not routes.elemental_triggers or not routes.elemental_triggers[tostring(id)] then return end
+            counts.elemental_weapon_selected=(counts.elemental_weapon_selected or 0)+1
+            local seen={}
+            for _,field in ipairs({"<_Container>k__BackingField","<LeftWeaponContainer>k__BackingField","<RightWeaponContainer>k__BackingField","<BackWeaponContainer>k__BackingField","<ShieldContainer>k__BackingField"}) do
+                local container=o:get_field(field)
+                if container and not seen[tostring(container)] then seen[tostring(container)]=true;schedule_element(container,id,true) end
+            end
+        end)
+        return ret
+    end) end
+    counts.elemental_hit_hook=elemental_hit~=nil;counts.elemental_weapon_hook=enchant~=nil
     sdk.hook(posted,function(args)
         local storage=thread.get_hook_storage();storage.dd2_outgoing_request=false
         guarded(function()
@@ -438,7 +563,7 @@ local function install_hit_provenance()
             local key=container and tostring(container)..":"..tostring(trigger_id)
             local row=key and hit_scheduled[key]
             if key then hit_scheduled[key]=nil end
-            storage.dd2_outgoing_request=row~=nil and row.allowed and frame<=row.until_frame
+            storage.dd2_outgoing_request=row~=nil and frame<=row.until_frame and row or false
         end)()
     end,function(ret)
         pcall(function()
@@ -447,7 +572,8 @@ local function install_hit_provenance()
             hit_requests[id]=nil
             if thread.get_hook_storage().dd2_outgoing_request then
                 if hit_request_count>=256 then hit_requests={};hit_request_count=0 end
-                hit_requests[id]={until_frame=frame+2};hit_request_count=hit_request_count+1
+                local row=thread.get_hook_storage().dd2_outgoing_request
+                hit_requests[id]={allowed=row.allowed,event=row.event,element=row.element,until_frame=frame+2};hit_request_count=hit_request_count+1
             end
         end)
         return ret
@@ -457,6 +583,7 @@ end
 local function install()
     routes=json.load_file("dd2_dualsense_routes.json")
     if type(routes)~="table" or routes.version~=2 or type(routes.events)~="table" then error("Run Setup.cmd to install sound routes") end
+    for _,rule in pairs(routes.elemental_triggers or {}) do enchant_events[rule.event]=rule.element end
     playing_method=find_method("via.simplewwise.Driver","getPlayingIdByRequestId",{"System.UInt32"})
     if not playing_method then error("Missing request lifetime lookup") end
     id_method=hook_required("via.simplewwise.Driver","getGameObjectId",{"via.GameObject","System.UInt32"},safe_pre(function(args)
@@ -466,6 +593,7 @@ local function install()
         storage.dd2_owned=false
         storage.dd2_owner_known=false
         storage.dd2_nearby_x=nil
+        storage.dd2_element=nil
         if sdk.is_managed_object(args[1]) then
             -- A transient/destroyed emitter is simply not attributable. Never
             -- latch all hooks off because one component is being unloaded.
@@ -473,6 +601,18 @@ local function install()
             local ok,owned=pcall(owns,object)
             storage.dd2_owned=ok and owned==true
             storage.dd2_owner_known=ok
+            if ok and owned and routes.elemental_triggers then
+                if element_probe_frame~=frame then element_probe_cache={};element_probe_frame=frame;element_probe_count=0 end
+                local key=tostring(object)
+                local cached=element_probe_cache[key]
+                if cached~=nil then storage.dd2_element=cached~=false and cached or nil
+                elseif element_probe_count<256 then
+                    local got,element=pcall(shell_element,object)
+                    if got then storage.dd2_element=element end
+                    if not got then counts.elemental_probe_error=tostring(element) end
+                    element_probe_cache[key]=storage.dd2_element or false;element_probe_count=element_probe_count+1
+                end
+            end
             if ok and not owned and routes.nearby_events then
                 local positioned,x,y,z=pcall(sound_position,object)
                 if positioned then
@@ -485,6 +625,10 @@ local function install()
         local ok,err=pcall(function()
             local storage=thread.get_hook_storage()
             local id=tostring(integer(ret))
+            if storage.dd2_element and (elemental_sources[id] or elemental_source_count<512) then
+                if not elemental_sources[id] then elemental_source_count=elemental_source_count+1 end
+                elemental_sources[id]={element=storage.dd2_element,frame=frame}
+            else forget_element(id) end
             update_nearby(id,storage.dd2_nearby_x,storage.dd2_nearby_y,storage.dd2_nearby_z,storage.dd2_nearby_frame)
             if storage.dd2_owned then owned_ids[id]=true
             elseif storage.dd2_owner_known then owned_ids[id]=nil;if not nearby_positions[id] then switches[id]=nil end end
@@ -500,6 +644,7 @@ local function install()
     hook_required("via.simplewwise.SendRequest","unregisterGameObject",{"System.UInt64"},safe_pre(function(args)
         local id=tostring(integer(args[2]))
         owned_ids[id]=nil;switches[id]=nil
+        forget_element(id)
         forget_nearby(id)
     end))
     install_hit_provenance()
@@ -588,6 +733,7 @@ re.on_frame(function()
     frame=frame+1
     local ok,err=pcall(function()
         if frame%15==1 then
+            for id,row in pairs(elemental_sources) do if frame-row.frame>2 then forget_element(id) end end
             for id,p in pairs(nearby_positions) do
                 if frame-p.frame>120 then
                     forget_nearby(id)

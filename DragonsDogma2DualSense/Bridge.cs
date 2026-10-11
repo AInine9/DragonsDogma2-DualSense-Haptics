@@ -76,7 +76,7 @@ static class Bridge
     }
     internal static void PostRow(Playback playback, JsonNode row) => playback.Post(
         row["id"]!.GetValue<uint>(), Values(row["switches"]), Values(row["states"]),
-        row["frame"]!.GetValue<long>(), row["object"]?.ToString() ?? "",row["lifetime"]?.GetValue<long>()??0,EventLevel(row));
+        row["frame"]!.GetValue<long>(), row["object"]?.ToString() ?? "",row["lifetime"]?.GetValue<long>()??0,EventLevel(row),ElementalFeedback.Parse(row["attack_element"]?.GetValue<string>()));
     // The inbox has acknowledged the whole batch. A bad local asset or row must
     // not discard later events or tear down a healthy controller output.
     internal static int PostRows(Playback playback,IEnumerable<JsonNode> rows,Action<Exception> onError)

@@ -113,7 +113,9 @@ static class Setup
     static string Routes()
     {
         var catalog=SoundCatalog.Load();
-        return JsonSerializer.Serialize(new{version=2,events=catalog.Events.Keys.ToDictionary(x=>x.ToString(),_=>true),nearby_events=catalog.NearbyEvents},Configuration.Json);
+        return JsonSerializer.Serialize(new{version=2,events=catalog.Events.Keys.ToDictionary(x=>x.ToString(),_=>true),nearby_events=catalog.NearbyEvents,
+            elemental_triggers=ElementalRoutes.Triggers.Where(p=>catalog.Events.ContainsKey(p.Value.Event)).ToDictionary(p=>p.Key.ToString(),p=>p.Value),
+            weapon_events=ElementalRoutes.WeaponEvents(catalog)},Configuration.Json);
     }
     static string TextHash(string text) => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
     internal static void CheckInstallFile(string file,string? recorded,string bundled,string legacy)
