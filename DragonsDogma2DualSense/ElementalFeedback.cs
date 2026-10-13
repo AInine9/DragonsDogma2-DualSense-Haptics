@@ -9,6 +9,7 @@ struct ElementalFeedback
     double lowLeft, lowRight;
     double thunderFast, thunderSlow;
     double auraFast, auraBody;
+    int auraSilentFrames;
     static readonly double lightCoefficient=1-Math.Exp(-2*Math.PI*160/48000);
     static readonly double darkCoefficient=1-Math.Exp(-2*Math.PI*55/48000);
     static readonly double auraFollow=1-Math.Exp(-1/(48000*.003));
@@ -54,6 +55,15 @@ struct ElementalFeedback
             double amplitude=Math.Max(Math.Abs(left),Math.Abs(right));
             auraFast+=(amplitude-auraFast)*auraFollow;
             auraBody+=(amplitude-auraBody)*auraSwell;
+            // Quantized PCM can contain isolated zeros inside a sustained sound.
+            // Keep the swell across those crossings; restart it only after a
+            // contiguous 10 ms silent gap. This is a debounce, not added decay.
+            if(amplitude==0)
+            {
+                if(auraSilentFrames<480)auraSilentFrames++;
+                if(auraSilentFrames==480)auraFast=auraBody=0;
+            }
+            else auraSilentFrames=0;
             double sustain=Math.Clamp(auraBody/Math.Max(.001,auraFast),0,1);
             emphasis=element==AttackElement.Dark?.35+.85*sustain:.70+.30*sustain;
         }
@@ -71,7 +81,7 @@ struct ElementalFeedback
         double edge=Math.Min(1,Math.Min(frame/72.0,(frames-1-frame)/480.0));
         // Exact source silence stays silent; a filter state must not turn an
         // authored gap into a new rumble or leave a tail beyond event lifetime.
-        if(left==0&&right==0){lowLeft=lowRight=0;auraFast=auraBody=0;l=r=0;return;}
+        if(left==0&&right==0){lowLeft=lowRight=0;l=r=0;return;}
         l=(float)((lowLeft*low+(left-lowLeft)*high)*emphasis*edge);
         r=(float)((lowRight*low+(right-lowRight)*high)*emphasis*edge);
     }

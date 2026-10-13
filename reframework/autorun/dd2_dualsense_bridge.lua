@@ -380,6 +380,12 @@ local function emit(id, object, request)
         level=nearby_level(id,object)
         if not level then counts.foreign=counts.foreign+1;observe(id,object,"foreign");return end
     end
+    -- Only confirmed weapon-enchant fire overlays: keep fire spells, contact
+    -- effects and unattributed/shared sounds at their existing level.
+    if attack_element=="fire" and enchant_events[id]=="fire"
+        and (weapon_sound or (outgoing and pending.contact==false)) then
+        level=level*.92
+    end
     -- Drop sounds while stopped/disconnected instead of replaying them later.
     if not fresh() or not suppressed then observe(id,object,"inactive");return end
     observe(id,object,"queued")
@@ -390,7 +396,7 @@ local function emit(id, object, request)
         lifetimes[token]={token=token,request=request,playing=0,frame=frame,id=id,object=object}
         lifetime_count=lifetime_count+1
     end
-    events[#events+1]={seq=event_seq,frame=frame,id=id,object=object,lifetime=token,level=level,attack_element=attack_element,switches=copy(switches[object]),states=copy(states)}
+    events[#events+1]={seq=event_seq,frame=frame,id=id,object=object,lifetime=token,level=level,attack_element=attack_element,outgoing_hit=outgoing and pending.contact==true or false,switches=copy(switches[object]),states=copy(states)}
     if attack_element then
         counts.elemental_events=(counts.elemental_events or 0)+1
         counts.elemental_last={id=id,element=attack_element,frame=frame,origin=outgoing and "request" or weapon_sound and "weapon_sound" or "shell"}
@@ -503,19 +509,19 @@ local function install_hit_provenance()
         local allowed=row~=nil and row.allowed and frame<=row.until_frame
             and not (prior~=nil and frame<=prior.until_frame)
         if hit_scheduled_count>=512 then hit_scheduled={};hit_scheduled_count=0 end
-        hit_scheduled[key]={allowed=allowed,event=1701720996,element=allowed and row.element or nil,until_frame=frame+2}
+        hit_scheduled[key]={allowed=allowed,contact=true,event=1701720996,element=allowed and row.element or nil,until_frame=frame+2}
         hit_scheduled_count=hit_scheduled_count+1
     end),unchanged)
     sdk.hook(clear,guarded(function(args)
         local o=receiver(args);if o then hit_controllers[tostring(o)]=nil end
     end),unchanged)
-    local function schedule_element(container,trigger_id,allowed)
+    local function schedule_element(container,trigger_id,allowed,contact)
         local rule=routes.elemental_triggers and routes.elemental_triggers[tostring(trigger_id)]
         if not container or not rule then return end
         local key=tostring(container)..":"..tostring(trigger_id)
         local prior=hit_scheduled[key]
         if hit_scheduled_count>=512 then hit_scheduled={};hit_scheduled_count=0 end
-        hit_scheduled[key]={allowed=allowed and not (prior and frame<=prior.until_frame),event=rule.event,element=rule.element,until_frame=frame+2}
+        hit_scheduled[key]={allowed=allowed and not (prior and frame<=prior.until_frame),event=rule.event,element=rule.element,contact=contact==true,until_frame=frame+2}
         hit_scheduled_count=hit_scheduled_count+1
     end
     -- The actual attribute-hit trigger can differ from TriggerId. Capture its
@@ -525,7 +531,7 @@ local function install_hit_provenance()
         local o,slot=receiver(args);if not o then return end
         local row=hit_controllers[tostring(o)]
         schedule_element(typed(args[slot+1],"app.WwiseContainerApp"),integer(args[slot+2])&0xffffffff,
-            row~=nil and row.player_attack and frame<=row.until_frame)
+            row~=nil and row.player_attack and frame<=row.until_frame,true)
     end),unchanged) end
     -- This getter is only queried by the game's weapon sound path. Its return
     -- selects the real enchant swoosh; no idle timer or synthetic pulse is added.
@@ -573,7 +579,7 @@ local function install_hit_provenance()
             if thread.get_hook_storage().dd2_outgoing_request then
                 if hit_request_count>=256 then hit_requests={};hit_request_count=0 end
                 local row=thread.get_hook_storage().dd2_outgoing_request
-                hit_requests[id]={allowed=row.allowed,event=row.event,element=row.element,until_frame=frame+2};hit_request_count=hit_request_count+1
+                hit_requests[id]={allowed=row.allowed,event=row.event,element=row.element,contact=row.contact,until_frame=frame+2};hit_request_count=hit_request_count+1
             end
         end)
         return ret

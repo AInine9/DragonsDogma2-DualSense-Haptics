@@ -181,16 +181,13 @@ static class SoundHaptics
         var stereo = new float[frames * 2];
         double Coef(double hz) => 1 - Math.Exp(-2 * Math.PI * hz / 48000);
         double a280 = Coef(280), a1200 = Coef(1200), adc = Coef(25);
-        // Follow the source's overall force rather than converting each fast
-        // amplitude fluctuation into a separate pressure impulse.
-        double attack = 1 - Math.Exp(-1 / (48000 * .004));
-        double releaseEnvelope = 1 - Math.Exp(-1 / (48000 * .045));
-        double Envelope(double current, double sample) => current + (Math.Abs(sample) - current) * (Math.Abs(sample) > current ? attack : releaseEnvelope);
         double max = 0;
         for (int channel = 0; channel < channels; channel++)
         {
             double low280 = 0, bodyLow = 0, bodyDc = 0, low1200 = 0;
-            double envMid = 0, envHigh = 0, outputDc = 0;
+            var midEnvelope = new TextureEnvelope();
+            var highEnvelope = new TextureEnvelope();
+            double outputDc = 0;
             var midOscillator = new SourcePhase(8);
             var highOscillator = new SourcePhase(32);
             double translatedLow = 0, translatedBody = 0;
@@ -201,8 +198,8 @@ static class SoundHaptics
                 bodyLow += a280 * (low280 - bodyLow);bodyDc += adc * (bodyLow - bodyDc);
                 low1200 += a1200 * (x - low1200);
                 double mid = low1200 - low280, high = x - low1200;
-                envMid = Envelope(envMid, mid);
-                envHigh = Envelope(envHigh, high);
+                double envMid = midEnvelope.Next(mid);
+                double envHigh = highEnvelope.Next(high);
                 // Keep recorded bass directly. Translate higher bands by dividing
                 // their own zero-crossing phase, never by clocking a shared tone.
                 // Pitch changes and noisy/tonal textures remain source-dependent.
@@ -229,6 +226,30 @@ static class SoundHaptics
         double scale = max > 0 ? level * Math.Min(8.0, .94 / max) : 0;
         for (int i = 0; i < stereo.Length; i++) stereo[i] *= (float)scale;
         return stereo;
+    }
+
+    // Preparation only: expose recorded changes without replacing sustained
+    // textures with an always-fast follower. Bass, phase, channel separation,
+    // authored timing and final boundary fades retain their existing paths.
+    struct TextureEnvelope
+    {
+        static readonly double attack=1-Math.Exp(-1/(48000*.004));
+        static readonly double release=1-Math.Exp(-1/(48000*.045));
+        static readonly double fastAttack=1-Math.Exp(-1/(48000*.0005));
+        static readonly double fastRelease=1-Math.Exp(-1/(48000*.006));
+        static readonly double follow=1-Math.Exp(-1/(48000*.002));
+        double slow,fast,mix;
+        public double Next(double sample)
+        {
+            double x=Math.Abs(sample);
+            slow+=(x-slow)*(x>slow?attack:release);
+            fast+=(x-fast)*(x>fast?fastAttack:fastRelease);
+            // Relative envelope disagreement detects attacks, gaps and decay;
+            // it is not a classifier for metal, wind or an in-game collision.
+            double change=Math.Clamp((Math.Abs(fast-slow)/Math.Max(.0001,slow)-.20)*1.5,0,.70);
+            mix+=(change-mix)*follow;
+            return slow+mix*(fast-slow);
+        }
     }
 
     struct SourcePhase(int divisor)

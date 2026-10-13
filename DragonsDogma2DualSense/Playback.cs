@@ -14,6 +14,7 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
     long currentLifetime;
     float currentLevel=1;
     AttackElement currentElement;
+    bool currentOutgoingHit;
     internal static float ValidateLevel(float level)
     {
         if(!float.IsFinite(level)||level<0||level>1.5f)throw new InvalidDataException("Invalid playback level");
@@ -21,13 +22,13 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
     }
     public object[] Recent => recent.ToArray();
     public int Played {get;private set;}
-    public void Post(uint eventId,IReadOnlyDictionary<uint,uint> switches,IReadOnlyDictionary<uint,uint> states,long frame=0,string objectId="",long lifetime=0,float level=1,AttackElement element=AttackElement.None)
+    public void Post(uint eventId,IReadOnlyDictionary<uint,uint> switches,IReadOnlyDictionary<uint,uint> states,long frame=0,string objectId="",long lifetime=0,float level=1,AttackElement element=AttackElement.None,bool outgoingHit=false)
     {
         ValidateLevel(level);
         if(level==0)return;
         if(!catalog.Events.TryGetValue(eventId,out var actions))return;
         currentEvent=eventId;currentFrame=frame;currentObject=objectId;currentLifetime=lifetime;currentLevel=level;
-        currentElement=element;
+        currentElement=element;currentOutgoingHit=outgoingHit;
         int budget=256;
         foreach(uint action in actions)Visit(action,0,switches,states,new HashSet<uint>(),ref budget);
     }
@@ -72,11 +73,15 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
         float level=currentLevel*(node.Bank=="meat_damage_m.sbnk.1.x64"?damageGain:1);
         if(!mixer.Play(PreparedWaves.Key(entry),delay,level:level,group:currentLifetime,emitter:currentObject,
             loops:node.LoopCount,loopStart:(int)Math.Round(entry.Playback.DelaySeconds*48000),
-            softFootstep:FootstepFeedback.Applies(currentEvent,node.Bank),element:currentElement))return;
+            softFootstep:FootstepFeedback.Applies(currentEvent,node.Bank),element:currentElement,
+            shapeMagicContact:MagicContactFeedback.Applies(currentEvent,id,node.Bank,node.LoopCount),
+            actionRelease:ActionReleaseFeedback.Select(currentEvent,id,node.Bank,node.LoopCount),
+            shapeBowHold:BowHoldFeedback.Applies(currentEvent,id,node.Bank,node.LoopCount),
+            shapeEnemyContact:EnemyContactFeedback.Applies(currentOutgoingHit,currentEvent,node.Bank,node.LoopCount)))return;
         Played++;
         if(recent.Count==64)recent.Dequeue();
         recent.Enqueue(new{event_id=currentEvent,frame=currentFrame,object_id=currentObject,lifetime=currentLifetime,
-            sound=id,draw=entry.Draw,hash=entry.Hash,level,attack_element=currentElement.ToString().ToLowerInvariant(),delay_frames=delay,length_frames=entry.Length/2,loop_count=node.LoopCount});
+            outgoing_hit=currentOutgoingHit,sound=id,draw=entry.Draw,hash=entry.Hash,level,attack_element=currentElement.ToString().ToLowerInvariant(),delay_frames=delay,length_frames=entry.Length/2,loop_count=node.LoopCount});
     }
     void Stop(uint id,HashSet<uint> seen)
     {
