@@ -116,6 +116,8 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
         public EnemyContactFeedback EnemyContact;
     }
     readonly List<Voice> voices = [];
+    readonly LockOnClick lockOnClick = new();
+    public bool PlayLockOnClick() { lock(gate) return !suspended && lockOnClick.Enqueue(); }
     // A bounded ring retains a stolen voice's next 20 ms instead of cutting it
     // at an arbitrary sample. No allocation or file access on the audio thread.
     readonly float[] retiring = new float[960 * 2];
@@ -127,8 +129,8 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
     static readonly float limiterRelease = (float)(1 - Math.Exp(-1 / (48000 * .045)));
     bool suspended;
     long generation;
-    public object Diagnostics { get { lock (gate) return new { voices = voices.Count, voice_steals = steals, limited_frames = limitedFrames }; } }
-    public bool Playing { get { lock (gate) return voices.Count > 0 || retirementRemaining > 0; } }
+    public object Diagnostics { get { lock (gate) return new { voices = voices.Count, voice_steals = steals, limited_frames = limitedFrames, lock_click_pending=lockOnClick.Pending }; } }
+    public bool Playing { get { lock (gate) return voices.Count > 0 || retirementRemaining > 0 || lockOnClick.Playing; } }
     public bool Play(string id, int delayFrames = 0, float level = 1, long group = 0, string emitter = "", int loops = 1, int loopStart = 0, bool softFootstep = false, AttackElement element = AttackElement.None, bool shapeMagicContact = false, ActionReleaseFeedback actionRelease = default, bool shapeBowHold = false, bool shapeEnemyContact = false)
     {
         long started;
@@ -171,7 +173,7 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
     {
         lock(gate)
         {
-            generation++;for(int i=voices.Count-1;i>=0;i--)RemoveVoice(i);
+            generation++;lockOnClick.Clear();for(int i=voices.Count-1;i>=0;i--)RemoveVoice(i);
             Array.Clear(retiring);retirementRemaining=0;limiterGain=1;
         }
     }
@@ -179,7 +181,7 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
     {
         lock(gate)
         {
-            generation++;suspended=true;limiterGain=1;
+            generation++;suspended=true;limiterGain=1;lockOnClick.Clear();
             for(int i=voices.Count-1;i>=0;i--)if(voices[i].Group==0||voices[i].Loops==1)RemoveVoice(i);
             Array.Clear(retiring);retirementRemaining=0;
         }
@@ -281,6 +283,7 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
             }
             for (int f = 0; f < frames; f++)
             {
+                float click=lockOnClick.Next()*Math.Min(gain,1.2f);
                 int p = retirementFrame * 2;
                 output[f * 4 + 2] += retiring[p] * gain;
                 output[f * 4 + 3] += retiring[p + 1] * gain;
@@ -298,6 +301,11 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
                     output[i + 1] *= limiterGain;
                     if (limiterGain < .99999f) limitedFrames++;
                 }
+                // Keep the 12ms click's contour outside the sound limiter.
+                // Only the click uses remaining headroom; other voices and their
+                // limiter state are unchanged. No hard clipping or gain boost.
+                float headroom=Math.Max(0,1-Math.Max(Math.Abs(output[f*4+2]),Math.Abs(output[f*4+3])));
+                output[f*4+2]+=click*headroom;output[f*4+3]+=click*headroom;
             }
         }
     }

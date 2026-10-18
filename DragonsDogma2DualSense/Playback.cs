@@ -22,6 +22,11 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
     }
     public object[] Recent => recent.ToArray();
     public int Played {get;private set;}
+    public void PostLockOnClick(int count=1)
+    {
+        if(count is <1 or >64)throw new InvalidDataException("Invalid lock-on count");
+        for(int i=0;i<count;i++)if(mixer.PlayLockOnClick())Played++;
+    }
     public void Post(uint eventId,IReadOnlyDictionary<uint,uint> switches,IReadOnlyDictionary<uint,uint> states,long frame=0,string objectId="",long lifetime=0,float level=1,AttackElement element=AttackElement.None,bool outgoingHit=false)
     {
         ValidateLevel(level);
