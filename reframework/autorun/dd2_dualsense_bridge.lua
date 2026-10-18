@@ -590,12 +590,14 @@ end
 local function install_lockon_click()
     -- The authored count dictionary contains repeated locks on the same work.
     -- Its getter refreshes the count cache; never substitute elapsed aim time.
-    local function lock_counts(owner,refresh)
+    local function lock_counts(owner,refresh,result)
         local dict=owner:call(refresh and "getTargetsCountDict" or "get_TargetsCountDict")
         local list=owner:get_field("Targets")
         local n=list and list:call("get_Count") or 0
         if type(n)~="number" or n<0 or n>64 then error("Invalid lock target count") end
-        local result={}
+        -- Scratch maps are reused only within this thread's guarded outer hook.
+        -- Clear every key before each read; no counts survive a fresh snapshot.
+        for key in pairs(result) do result[key]=nil end
         for i=0,n-1 do
             local target=list:call("get_Item",i)
             if target then
@@ -632,7 +634,7 @@ local function install_lockon_click()
                 local storage=thread.get_hook_storage()
                 storage.dd2_lock_depth=(storage.dd2_lock_depth or 0)+1
                 if storage.dd2_lock_depth~=1 then return end
-                storage.dd2_lock_candidate=nil
+                storage.dd2_lock_owner=nil
                 local ok,err=pcall(function()
                     if not fresh() or not suppressed or not player_character then return end
                     local owner
@@ -645,20 +647,23 @@ local function install_lockon_click()
                     if not owner or tostring(owner:get_field("Chara"))~=tostring(player_character) then return end
                     if player_character:call("getWeaponJob()")~=8 then return end
                     counts.lockon_controller_max=owner:get_field("MaximumNumTarget")
-                    storage.dd2_lock_candidate={owner=owner,before=lock_counts(owner,refresh)}
+                    storage.dd2_lock_before=storage.dd2_lock_before or {}
+                    storage.dd2_lock_after=storage.dd2_lock_after or {}
+                    lock_counts(owner,refresh,storage.dd2_lock_before)
+                    storage.dd2_lock_owner=owner
                 end)
                 if not ok then counts.lockon_error=tostring(err) end
             end,function(ret)
                 local storage=thread.get_hook_storage()
                 local depth=storage.dd2_lock_depth or 1
                 if depth~=1 then storage.dd2_lock_depth=math.max(0,depth-1);return ret end
-                local row=storage.dd2_lock_candidate;storage.dd2_lock_candidate=nil
+                local owner=storage.dd2_lock_owner;storage.dd2_lock_owner=nil
                 -- Retain depth while refreshing, so the getter's updater cannot emit twice.
                 local ok,err=pcall(function()
-                    if not row or not fresh() or not suppressed then return end
-                    local after=lock_counts(row.owner,refresh)
+                    if not owner or not fresh() or not suppressed then return end
+                    local after=lock_counts(owner,refresh,storage.dd2_lock_after)
                     local added=0
-                    for key,n in pairs(after) do added=added+math.max(0,n-(row.before[key] or 0)) end
+                    for key,n in pairs(after) do added=added+math.max(0,n-(storage.dd2_lock_before[key] or 0)) end
                     counts.lockon_last_added=added
                     if added>0 then
                         local count=math.min(added,64)

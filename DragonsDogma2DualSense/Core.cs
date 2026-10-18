@@ -308,9 +308,11 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
                 }
                 if(v.Pos>=v.End && (!v.Confirmed || v.Loops==1))RemoveVoice(i);
             }
+            bool renderClick=lockOnClick.NeedsAdvance;
+            float clickGain=renderClick?Math.Min(gain,1.2f):0;
             for (int f = 0; f < frames; f++)
             {
-                float click=lockOnClick.Next()*Math.Min(gain,1.2f);
+                float click=renderClick?lockOnClick.Next()*clickGain:0;
                 int p = retirementFrame * 2;
                 output[f * 4 + 2] += retiring[p] * gain;
                 output[f * 4 + 3] += retiring[p + 1] * gain;
@@ -331,8 +333,11 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
                 // Keep the 12ms click's contour outside the sound limiter.
                 // Only the click uses remaining headroom; other voices and their
                 // limiter state are unchanged. No hard clipping or gain boost.
-                float headroom=Math.Max(0,1-Math.Max(Math.Abs(output[f*4+2]),Math.Abs(output[f*4+3])));
-                output[f*4+2]+=click*headroom;output[f*4+3]+=click*headroom;
+                if(click!=0)
+                {
+                    float headroom=Math.Max(0,1-Math.Max(Math.Abs(output[f*4+2]),Math.Abs(output[f*4+3])));
+                    output[f*4+2]+=click*headroom;output[f*4+3]+=click*headroom;
+                }
             }
         }
     }

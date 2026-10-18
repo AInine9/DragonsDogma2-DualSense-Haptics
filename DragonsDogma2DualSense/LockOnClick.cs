@@ -9,6 +9,8 @@ sealed class LockOnClick
     int pending, position=SpacingFrames;
     public int Pending => pending+(position<PulseFrames?1:0);
     public bool Playing => pending>0 || position<PulseFrames;
+    // The silent spacing must still advance before the next queued click.
+    internal bool NeedsAdvance => pending>0 || position<SpacingFrames;
     public bool Enqueue()
     {
         if(pending>=Capacity)return false;
