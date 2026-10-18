@@ -9,7 +9,7 @@ static class PreparedWaves
     public record Entry(string Hash,int Length,uint Sound,int Draw,SoundPlayback Playback,bool Omitted=false);
     public record Index(string CatalogHash,string Renderer,Dictionary<uint,Entry[]> Sounds,string Filter="");
     public const string Filter="single-middle-peak001-rms0001-v1";
-    public const string Renderer="dd2-source-texture-v5";
+    public const string Renderer="dd2-source-texture-v51";
     // Content after pitch is bounded to 60 seconds, plus up to 30 seconds of authored delay.
     internal const int MaxWaveSamples=2*(SoundHaptics.MaxContentFrames+48000*SoundHaptics.MaxDelaySeconds);
     public static string WavePath(string hash)
@@ -59,7 +59,7 @@ static class PreparedWaves
                     foreach(int draw in new[]{SoundHaptics.RepresentativeDraw(variant)})
                     {
                         var playback=SoundHaptics.Realize(variant,draw,draws);
-                        var wave=SoundHaptics.Render(source,n.Family,playback);
+                        var wave=SoundHaptics.Render(source,n.Family,playback,n.Bank,id);
                         if(wave.All(v=>Math.Abs(v)<.00001f))continue;
                         string hash=Convert.ToHexStringLower(SHA256.HashData(MemoryMarshal.AsBytes(wave.AsSpan())));
                         // Keep the selected sound silent; never replace it with a stronger variant.

@@ -19,7 +19,7 @@ static class SoundHaptics
 
     internal const int MaxContentFrames=48000*60;
     internal const int MaxDelaySeconds=30;
-    internal static float[] Render(float[] stereo, string family, SoundPlayback playback)
+    internal static float[] Render(float[] stereo, string family, SoundPlayback playback, string bank = "", uint sound = 0)
     {
         if(stereo.Length%2!=0||stereo.Length/2>MaxContentFrames
             ||!double.IsFinite(playback.PitchCents)||Math.Abs(playback.PitchCents)>4800
@@ -29,7 +29,7 @@ static class SoundHaptics
         // allocating it; lowering pitch must not bypass the existing 60-second limit.
         double frames=Math.Ceiling((stereo.Length/2)/Math.Pow(2,playback.PitchCents/1200.0));
         if(frames>MaxContentFrames)throw new InvalidDataException("Pitched haptic source exceeds 60 seconds");
-        var tactile = Scale(ConvertChannels(ApplyPlayback(stereo, 2, playback, false), 2, family), playback.VolumeDb);
+        var tactile = Scale(ConvertChannels(ApplyPlayback(stereo, 2, playback, false), 2, family, SourceTexture.Select(bank, sound)), playback.VolumeDb);
         // Match PCM16's silence floor, so inaudible branches cannot suppress rumble.
         for (int i = 0; i < tactile.Length; i++) tactile[i] = (float)Math.Round(tactile[i] * 32767) / 32767f;
         return AddDelay(tactile, 2, playback.DelaySeconds);
@@ -168,7 +168,7 @@ static class SoundHaptics
     }
     internal static float[] Convert(float[] source, string family) => ConvertChannels(source, 1, family);
 
-    static float[] ConvertChannels(float[] source, int channels, string family)
+    static float[] ConvertChannels(float[] source, int channels, string family, SourceTexture.Profile? selected = null)
     {
         if (source.Any(v => !float.IsFinite(v))) throw new InvalidDataException("Non-finite source");
         int frames = source.Length / channels;
@@ -178,18 +178,20 @@ static class SoundHaptics
         // sustained magic. No fixed-duration crop or imposed exponential decay.
         // These artistic tunings are not a calibrated actuator transfer function.
         double level = family == "footsteps" ? .45 : family == "attack" ? .85 : .95;
+        var texture = selected ?? SourceTexture.Default;
         var stereo = new float[frames * 2];
         double Coef(double hz) => 1 - Math.Exp(-2 * Math.PI * hz / 48000);
         double a280 = Coef(280), a1200 = Coef(1200), adc = Coef(25);
+        double translatedCoefficient = Coef(texture.TranslationCutoff);
         double max = 0;
         for (int channel = 0; channel < channels; channel++)
         {
             double low280 = 0, bodyLow = 0, bodyDc = 0, low1200 = 0;
-            var midEnvelope = new TextureEnvelope();
-            var highEnvelope = new TextureEnvelope();
+            var midEnvelope = new TextureEnvelope(texture, false);
+            var highEnvelope = new TextureEnvelope(texture, true);
             double outputDc = 0;
-            var midOscillator = new SourcePhase(8);
-            var highOscillator = new SourcePhase(32);
+            var midOscillator = new SourcePhase(texture.MidDivisor, texture.PhaseFollow, texture.Edged);
+            var highOscillator = new SourcePhase(texture.HighDivisor, texture.PhaseFollow, texture.Edged);
             double translatedLow = 0, translatedBody = 0;
             for (int i = 0; i < frames; i++)
             {
@@ -205,9 +207,9 @@ static class SoundHaptics
                 // Pitch changes and noisy/tonal textures remain source-dependent.
                 // Advance continuously between measured source crossings. V3
                 // held phase flat then jumped it at every audio zero crossing.
-                double translated = .9 * envMid * midOscillator.Next(mid, i) + .4 * envHigh * highOscillator.Next(high, i);
-                translatedLow += a280 * (translated - translatedLow);
-                translatedBody += a280 * (translatedLow - translatedBody);
+                double translated = texture.MidGain * envMid * midOscillator.Next(mid, i) + texture.HighGain * envHigh * highOscillator.Next(high, i);
+                translatedLow += translatedCoefficient * (translated - translatedLow);
+                translatedBody += translatedCoefficient * (translatedLow - translatedBody);
                 // Preserve actual recorded bass transients. Do not add another
                 // impulse from the amplitude envelope on top of those transients.
                 double v = 1.4 * (bodyLow - bodyDc) + translatedBody;
@@ -231,10 +233,10 @@ static class SoundHaptics
     // Preparation only: expose recorded changes without replacing sustained
     // textures with an always-fast follower. Bass, phase, channel separation,
     // authored timing and final boundary fades retain their existing paths.
-    struct TextureEnvelope
+    struct TextureEnvelope(SourceTexture.Profile texture, bool upper)
     {
-        static readonly double attack=1-Math.Exp(-1/(48000*.004));
-        static readonly double release=1-Math.Exp(-1/(48000*.045));
+        readonly double attack=1-Math.Exp(-1/(48000*(upper?texture.HighAttack:texture.Attack)));
+        readonly double release=1-Math.Exp(-1/(48000*(upper?texture.HighRelease:texture.Release)));
         static readonly double fastAttack=1-Math.Exp(-1/(48000*.0005));
         static readonly double fastRelease=1-Math.Exp(-1/(48000*.006));
         static readonly double follow=1-Math.Exp(-1/(48000*.002));
@@ -252,7 +254,7 @@ static class SoundHaptics
         }
     }
 
-    struct SourcePhase(int divisor)
+    struct SourcePhase(int divisor, double follow, bool edged)
     {
         double phase, frequency, target, previous, crossing;
         int sign;
@@ -269,11 +271,12 @@ static class SoundHaptics
                 crossing = now; measured = true;
             }
             sign = next; previous = sample;
-            // 12 Hz smoothing avoids pitch steps caused by noisy crossings.
-            frequency += .00156956327 * (target - frequency);
+            // Source-specific smoothing retains rapid detail without phase jumps.
+            frequency += follow * (target - frequency);
             phase += 2 * Math.PI * frequency / 48000;
             if (phase >= 2 * Math.PI) phase -= 2 * Math.PI;
-            return Math.Sin(phase);
+            double fundamental = Math.Sin(phase);
+            return edged ? .80 * Math.Clamp(3 * fundamental, -1, 1) : fundamental;
         }
     }
 }
