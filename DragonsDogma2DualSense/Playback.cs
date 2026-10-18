@@ -70,12 +70,13 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
     }
     void PlaySound(uint id,SoundNode node,int delay)
     {
+        if(BowReleaseFeedback.Mute(currentEvent))return;
         if(!index.Sounds.TryGetValue(id,out var entries)||entries.Length==0)return;
         var entry=entries[random.Next(entries.Length)];
         if(entry.Omitted)return;
         // This bank is confirmed in live player damage playback. Scale only its
         // existing source-derived signal; ownership and omitted choices stay intact.
-        float level=currentLevel*(node.Bank=="meat_damage_m.sbnk.1.x64"?damageGain:1);
+        float level=currentLevel*(node.Bank=="meat_damage_m.sbnk.1.x64"?damageGain:1)*BowReleaseFeedback.DrawGain(currentEvent,node.Bank);
         if(!mixer.Play(PreparedWaves.Key(entry),delay,level:level,group:currentLifetime,emitter:currentObject,
             loops:node.LoopCount,loopStart:(int)Math.Round(entry.Playback.DelaySeconds*48000),
             softFootstep:FootstepFeedback.Applies(currentEvent,node.Bank),element:currentElement,
