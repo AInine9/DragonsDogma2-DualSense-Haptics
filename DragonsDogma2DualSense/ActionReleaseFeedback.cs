@@ -1,6 +1,6 @@
 namespace DragonsDogma2DualSense;
 
-// Exact one-shot action routes. Follow recorded rises rather than adding an
+// Exact action and confirmed-loop routes. Follow recorded rises rather than adding an
 // impulse or imposing animation timing on playback. Source PCM stays immutable.
 struct ActionReleaseFeedback(int startFrame,float inverseFadeFrames,float tailReduction,
     double bodyReduction=.08,double riseContrast=.14,bool shortAttack=false,
@@ -22,7 +22,20 @@ struct ActionReleaseFeedback(int startFrame,float inverseFadeFrames,float tailRe
     public readonly bool Enabled => riseContrast!=0;
     internal static ActionReleaseFeedback Select(uint eventId,uint soundId,string bank,int loops)
     {
+        // Whirling-arrow draw and hold start together in the authored motion.
+        // Keep the hold's fine texture while easing its low bed; no timing gate
+        // or synthesized release is added, and its confirmed loop owns lifetime.
+        if(bank=="job02_skill_m.sbnk.1.x64" && eventId==3465101965 && soundId==177035179 && loops==0)
+            return new(0,0,0,.08,.08,false,.78);
         if(loops!=1)return default;
+        // The broad slash body can mask its separately authored passing swish.
+        // Balance only this route's low bed, leaving shared sword sounds alone.
+        if(bank=="job01_skill_m.sbnk.1.x64" && eventId==732919090 && soundId==130779092)
+            return new(0,0,0,.06,.06,true,.85);
+        // Air-shot's low layer overlaps the later fine release cue. Preserve
+        // recorded rises while making room in this exact three-cue sequence.
+        if(bank=="job02_skill_m.sbnk.1.x64" && eventId==2409290161 && soundId==755854199)
+            return new(0,0,0,.06,.06,false,.82);
         // WindWave's ten ground/air starts post this cue at authored frame 2.
         // Its broad, high-frequency source follows the arm sweep; soften the
         // prepared rises without adding a launch/contact impulse or timer.
