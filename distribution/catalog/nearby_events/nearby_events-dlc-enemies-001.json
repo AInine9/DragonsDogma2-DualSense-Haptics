@@ -1,0 +1,19 @@
+{
+  "3758235750": {"kind":"giant_footstep","radius":35,"gain":0.816},
+  "805547938": {"kind":"giant_impact","radius":45,"gain":1.15},
+  "830128232": {"kind":"giant_landing","radius":30,"gain":0.8},
+  "2181985848": {"kind":"giant_impact","radius":45,"gain":0.9555},
+  "3350571302": {"kind":"giant_landing","radius":30,"gain":0.83},
+  "1170835534": {"kind":"giant_impact","radius":45,"gain":1.264},
+  "439992572": {"kind":"giant_landing","radius":30,"gain":0.457},
+  "1083409134": {"kind":"giant_footstep","radius":35,"gain":1.30125},
+  "3716408912": {"kind":"giant_impact","radius":45,"gain":0.568},
+  "578498574": {"kind":"giant_landing","radius":30,"gain":0.319},
+  "609047082": {"kind":"giant_impact","radius":45,"gain":1.366},
+  "1306337790": {"kind":"giant_footstep","radius":35,"gain":1.34},
+  "3224563232": {"kind":"giant_landing","radius":30,"gain":0.75},
+  "1572558409": {"kind":"giant_attack","radius":45,"gain":1.2445},
+  "3470095627": {"kind":"giant_attack","radius":45,"gain":0.623},
+  "4076065018": {"kind":"giant_attack","radius":45,"gain":1.013},
+  "1145322768": {"kind":"giant_landing","radius":45,"gain":0.229}
+}

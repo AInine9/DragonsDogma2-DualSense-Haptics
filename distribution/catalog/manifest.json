@@ -2,7 +2,8 @@
   "format": 1,
   "sections": {
     "banks": [
-      "banks/banks-001.json"
+      "banks/banks-001.json",
+      "banks/banks-dlc-enemies-001.json"
     ],
     "nodes": [
       "nodes/actionplay-001.json",
@@ -68,7 +69,8 @@
       "nodes/layercntr-tu4-001.json",
       "nodes/ranseqcntr-tu4-001.json",
       "nodes/sound-tu4-001.json",
-      "nodes/switchcntr-tu4-001.json"
+      "nodes/switchcntr-tu4-001.json",
+      "nodes/nodes-dlc-enemies-001.json"
     ],
     "events": [
       "events/events-001.json",
@@ -77,10 +79,12 @@
       "events/events-004.json",
       "events/events-005.json",
       "events/events-006.json",
-      "events/events-tu4-001.json"
+      "events/events-tu4-001.json",
+      "events/events-dlc-enemies-001.json"
     ],
     "nearby_events": [
-      "nearby_events/nearby_events-001.json"
+      "nearby_events/nearby_events-001.json",
+      "nearby_events/nearby_events-dlc-enemies-001.json"
     ]
   }
 }

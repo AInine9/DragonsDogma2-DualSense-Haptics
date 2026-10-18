@@ -77,7 +77,8 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
         if(entry.Omitted)return;
         // This bank is confirmed in live player damage playback. Scale only its
         // existing source-derived signal; ownership and omitted choices stay intact.
-        float level=currentLevel*(node.Bank=="meat_damage_m.sbnk.1.x64"?damageGain:1)*BowReleaseFeedback.DrawGain(currentEvent,node.Bank);
+        float level=currentLevel*(node.Bank=="meat_damage_m.sbnk.1.x64"?damageGain:1)*BowReleaseFeedback.DrawGain(currentEvent,node.Bank)
+            *NearbyEnemyFeedback.SourceGain(currentEvent,node.Bank);
         int limitFrames=node.Bank=="job08_skill_m.sbnk.1.x64"?
             BowReleaseFeedback.MagickRelease(currentEvent)?12000+(int)Math.Round(entry.Playback.DelaySeconds*48000):
             currentEvent==2126607540u?5760:0:0;
