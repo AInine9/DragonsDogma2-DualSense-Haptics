@@ -6,7 +6,7 @@ struct FootstepFeedback
 {
     internal static bool Applies(uint eventId, string bank) => eventId switch
     {
-        2357958976 or 2357959006 => bank == "pm_pl_m.sbnk.1.x64",
+        2357958976 or 2357959006 => bank is "pm_pl_m.sbnk.1.x64" or "pm_pl_nrd_m.sbnk.1.x64",
         2448530926 or 2448530928 => bank == "pl_wear_foot_m.sbnk.1.x64",
         _ => false
     };
