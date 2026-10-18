@@ -32,6 +32,7 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
         ValidateLevel(level);
         if(level==0)return;
         if(!catalog.Events.TryGetValue(eventId,out var actions))return;
+        if(BowReleaseFeedback.MagickRelease(eventId))mixer.FinishMagickRelease(objectId);
         currentEvent=eventId;currentFrame=frame;currentObject=objectId;currentLifetime=lifetime;currentLevel=level;
         currentElement=element;currentOutgoingHit=outgoingHit;
         int budget=256;
@@ -77,17 +78,22 @@ sealed class Playback(SoundCatalog catalog, PreparedWaves.Index index, Mixer mix
         // This bank is confirmed in live player damage playback. Scale only its
         // existing source-derived signal; ownership and omitted choices stay intact.
         float level=currentLevel*(node.Bank=="meat_damage_m.sbnk.1.x64"?damageGain:1)*BowReleaseFeedback.DrawGain(currentEvent,node.Bank);
+        int limitFrames=node.Bank=="job08_skill_m.sbnk.1.x64"?
+            BowReleaseFeedback.MagickRelease(currentEvent)?12000+(int)Math.Round(entry.Playback.DelaySeconds*48000):
+            currentEvent==2126607540u?5760:0:0;
         if(!mixer.Play(PreparedWaves.Key(entry),delay,level:level,group:currentLifetime,emitter:currentObject,
             loops:node.LoopCount,loopStart:(int)Math.Round(entry.Playback.DelaySeconds*48000),
             softFootstep:FootstepFeedback.Applies(currentEvent,node.Bank),element:currentElement,
             shapeMagicContact:MagicContactFeedback.Applies(currentEvent,id,node.Bank,node.LoopCount),
             actionRelease:ActionReleaseFeedback.Select(currentEvent,id,node.Bank,node.LoopCount),
             shapeBowHold:BowHoldFeedback.Applies(currentEvent,id,node.Bank,node.LoopCount),
-            shapeEnemyContact:EnemyContactFeedback.Applies(currentOutgoingHit,currentEvent,node.Bank,node.LoopCount)))return;
+            shapeEnemyContact:EnemyContactFeedback.Applies(currentOutgoingHit,currentEvent,node.Bank,node.LoopCount),
+            maxFrames:limitFrames,
+            magickDraw:node.Bank=="job08_skill_m.sbnk.1.x64"&&BowReleaseFeedback.DrawGain(currentEvent,node.Bank)<1,eventId:currentEvent))return;
         Played++;
         if(recent.Count==64)recent.Dequeue();
         recent.Enqueue(new{event_id=currentEvent,frame=currentFrame,object_id=currentObject,lifetime=currentLifetime,
-            outgoing_hit=currentOutgoingHit,sound=id,draw=entry.Draw,hash=entry.Hash,level,attack_element=currentElement.ToString().ToLowerInvariant(),delay_frames=delay,length_frames=entry.Length/2,loop_count=node.LoopCount});
+            outgoing_hit=currentOutgoingHit,sound=id,draw=entry.Draw,hash=entry.Hash,level,attack_element=currentElement.ToString().ToLowerInvariant(),delay_frames=delay,length_frames=entry.Length/2,playback_limit_frames=limitFrames,loop_count=node.LoopCount});
     }
     void Stop(uint id,HashSet<uint> seen)
     {

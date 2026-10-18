@@ -98,7 +98,9 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
     {
         public string Id=id, Emitter=emitter;
         public float[] Data=data;
-        public int Pos=pos, Loops=loops, LoopStart=loopStart;
+        public int Pos=pos, Loops=loops, LoopStart=loopStart, End=data.Length, TailFadeFrames;
+        public bool MagickDraw;
+        public uint EventId;
         public float Level=level;
         public long Group=group;
         public bool Confirmed;
@@ -129,9 +131,11 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
     static readonly float limiterRelease = (float)(1 - Math.Exp(-1 / (48000 * .045)));
     bool suspended;
     long generation;
-    public object Diagnostics { get { lock (gate) return new { voices = voices.Count, voice_steals = steals, limited_frames = limitedFrames, lock_click_pending=lockOnClick.Pending }; } }
+    public object Diagnostics { get { lock (gate) return new { voices = voices.Count, voice_steals = steals, limited_frames = limitedFrames,
+        lock_click_pending=lockOnClick.Pending,
+        bow_voices=voices.Where(v=>v.MagickDraw||BowReleaseFeedback.MagickRelease(v.EventId)||v.EventId==1017415065u).Take(12).Select(v=>new{event_id=v.EventId,emitter=v.Emitter,group=v.Group,position_frames=v.Pos/2,end_frames=v.End/2,remaining_ms=Math.Max(0,(v.End-v.Pos)/96.0),loops=v.Loops,confirmed=v.Confirmed,draw=v.MagickDraw}).ToArray() }; } }
     public bool Playing { get { lock (gate) return voices.Count > 0 || retirementRemaining > 0 || lockOnClick.Playing; } }
-    public bool Play(string id, int delayFrames = 0, float level = 1, long group = 0, string emitter = "", int loops = 1, int loopStart = 0, bool softFootstep = false, AttackElement element = AttackElement.None, bool shapeMagicContact = false, ActionReleaseFeedback actionRelease = default, bool shapeBowHold = false, bool shapeEnemyContact = false)
+    public bool Play(string id, int delayFrames = 0, float level = 1, long group = 0, string emitter = "", int loops = 1, int loopStart = 0, bool softFootstep = false, AttackElement element = AttackElement.None, bool shapeMagicContact = false, ActionReleaseFeedback actionRelease = default, bool shapeBowHold = false, bool shapeEnemyContact = false, int maxFrames = 0, bool magickDraw = false, uint eventId = 0)
     {
         long started;
         lock(gate)
@@ -157,7 +161,7 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
                 if(voices.Count(v=>v.Id==id)>=4)Retire(voices.FindIndex(v=>v.Id==id&&v.Loops==1),960,true);
                 if(voices.Count==32)Retire(voices.FindIndex(v=>v.Loops==1),960,true);
                 voices.Add(new(id,data,-Math.Max(0,delayFrames)*2,level,group,emitter,
-                    group==0?1:Math.Max(0,loops),Math.Clamp(loopStart*2,0,data.Length-2)){Lease=lease,SoftFootstep=softFootstep,Element=element,ShapeMagicContact=shapeMagicContact,ActionRelease=actionRelease,ShapeBowHold=shapeBowHold,ShapeEnemyContact=shapeEnemyContact});
+                    group==0||maxFrames>0?1:Math.Max(0,loops),Math.Clamp(loopStart*2,0,data.Length-2)){Lease=lease,SoftFootstep=softFootstep,Element=element,ShapeMagicContact=shapeMagicContact,ActionRelease=actionRelease,ShapeBowHold=shapeBowHold,ShapeEnemyContact=shapeEnemyContact,MagickDraw=magickDraw,EventId=eventId,End=maxFrames>0?Math.Min(data.Length,maxFrames*2):data.Length,TailFadeFrames=maxFrames>0&&maxFrames*2<data.Length?2400:0});
                 lease=null;return true;
             }
         }
@@ -195,22 +199,44 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
         using var lease=v.Lease;
         if(suspended)return;
         if (v.Pos <= 0) return; // Unstarted voices have produced no samples yet.
-        int frames = Math.Min(fadeFrames, (v.Data.Length - v.Pos) / 2);
+        int frames = Math.Min(fadeFrames, (v.End - v.Pos) / 2);
         for (int f = 0; f < frames; f++)
         {
-            float level = v.Level * (1 - f / (float)Math.Max(1, frames - 1));
+            float level = v.Level * (1 - f / (float)Math.Max(1, frames - 1))*TailGain(v,v.Pos/2+f);
             int p = ((retirementFrame + f) % 960) * 2;
             float left = v.Data[v.Pos + f * 2], right = v.Data[v.Pos + f * 2 + 1];
-            if (v.SoftFootstep) v.Footstep.Process(left, right, v.Pos / 2 + f, v.Data.Length / 2, out left, out right);
+            if (v.SoftFootstep) v.Footstep.Process(left, right, v.Pos / 2 + f, v.End / 2, out left, out right);
             if (v.ShapeMagicContact) v.MagicContact.Process(left,right,out left,out right);
             if (v.ShapeBowHold) v.BowHold.Process(left,right,out left,out right);
             if (v.ActionRelease.Enabled) v.ActionRelease.Process(left,right,v.Pos/2+f,out left,out right);
-            if (v.Element!=AttackElement.None) v.ElementFeedback.Process(v.Element,left,right,v.Pos/2+f,v.Data.Length/2,out left,out right);
+            if (v.Element!=AttackElement.None) v.ElementFeedback.Process(v.Element,left,right,v.Pos/2+f,v.End/2,out left,out right);
             if(v.ShapeEnemyContact)v.EnemyContact.Process(left,right,out left,out right);
             retiring[p] += left * level;
             retiring[p + 1] += right * level;
         }
         retirementRemaining = Math.Max(retirementRemaining, frames);
+    }
+    static float TailGain(Voice v,int frame)
+    {
+        if(v.TailFadeFrames==0)return 1;
+        float t=Math.Clamp((v.End/2-1-frame)/(float)v.TailFadeFrames,0,1);
+        return t*t*(3-2*t);
+    }
+    // The shared sound is only shortened when a confirmed magick-arrow release
+    // follows on the same emitter within 250ms. Other vocations remain untouched.
+    public void FinishMagickRelease(string emitter)
+    {
+        EndMagickDraw();
+        if(emitter.Length==0)return;
+        lock(gate)foreach(var v in voices)
+            if(v.EventId==1017415065u&&v.Emitter==emitter&&v.Pos>=0&&v.Pos<=24000)
+            {
+                v.End=Math.Min(v.End,v.Pos+24000);v.TailFadeFrames=2400;v.Loops=1;
+            }
+    }
+    public void EndMagickDraw()
+    {
+        lock(gate)for(int i=voices.Count-1;i>=0;i--)if(voices[i].MagickDraw)Retire(i,384,false);
     }
     public void FadeOut(string id, string? emitter = null)
     {
@@ -247,26 +273,27 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
                 if(v.Pos<0){int skip=Math.Min(frames,-v.Pos/2);v.Pos+=skip*2;at+=skip;}
                 while(at<frames && v.Pos>=0)
                 {
-                    if(v.Pos>=v.Data.Length)
+                    if(v.Pos>=v.End)
                     {
                         if(!v.Confirmed || v.Loops==1)break;
                         if(v.Loops>1)v.Loops--;
                         v.Pos=v.LoopStart;
                     }
-                    int n=Math.Min(frames-at,(v.Data.Length-v.Pos)/2);
-                    if (v.SoftFootstep || v.ShapeMagicContact || v.ShapeBowHold || v.ActionRelease.Enabled || v.ShapeEnemyContact || v.Element!=AttackElement.None)
+                    int n=Math.Min(frames-at,(v.End-v.Pos)/2);
+                    if (v.SoftFootstep || v.ShapeMagicContact || v.ShapeBowHold || v.ActionRelease.Enabled || v.ShapeEnemyContact || v.Element!=AttackElement.None || v.TailFadeFrames>0)
                     {
                         for (int f = 0; f < n; f++)
                         {
                             float left=v.Data[v.Pos+f*2],right=v.Data[v.Pos+f*2+1];
-                            if(v.SoftFootstep) v.Footstep.Process(left,right,v.Pos/2+f,v.Data.Length/2,out left,out right);
+                            if(v.SoftFootstep) v.Footstep.Process(left,right,v.Pos/2+f,v.End/2,out left,out right);
                             if(v.ShapeMagicContact) v.MagicContact.Process(left,right,out left,out right);
                             if(v.ShapeBowHold) v.BowHold.Process(left,right,out left,out right);
                             if(v.ActionRelease.Enabled) v.ActionRelease.Process(left,right,v.Pos/2+f,out left,out right);
-                            if(v.Element!=AttackElement.None) v.ElementFeedback.Process(v.Element,left,right,v.Pos/2+f,v.Data.Length/2,out left,out right);
+                            if(v.Element!=AttackElement.None) v.ElementFeedback.Process(v.Element,left,right,v.Pos/2+f,v.End/2,out left,out right);
                             if(v.ShapeEnemyContact)v.EnemyContact.Process(left,right,out left,out right);
-                            output[(at + f) * 4 + 2] += left * gain * v.Level;
-                            output[(at + f) * 4 + 3] += right * gain * v.Level;
+                            float tail=TailGain(v,v.Pos/2+f);
+                            output[(at + f) * 4 + 2] += left * gain * v.Level*tail;
+                            output[(at + f) * 4 + 3] += right * gain * v.Level*tail;
                         }
                     }
                     else
@@ -279,7 +306,7 @@ sealed class Mixer(IReadOnlyDictionary<string, float[]> samples, float gain, boo
                     }
                     v.Pos+=n*2;at+=n;
                 }
-                if(v.Pos>=v.Data.Length && (!v.Confirmed || v.Loops==1))RemoveVoice(i);
+                if(v.Pos>=v.End && (!v.Confirmed || v.Loops==1))RemoveVoice(i);
             }
             for (int f = 0; f < frames; f++)
             {
