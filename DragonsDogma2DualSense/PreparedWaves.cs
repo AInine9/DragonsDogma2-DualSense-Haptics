@@ -23,7 +23,7 @@ static class PreparedWaves
         if(i.CatalogHash!=Files.Sha(Files.Bundled("catalog.json")) || i.Renderer!=Renderer || i.Filter!=Filter)throw new InvalidDataException("Prepared assets are outdated; run Setup.cmd");
         return i;
     }
-    public static void Prepare(SoundCatalog catalog,string extracted,string decoder)
+    public static void Prepare(SoundCatalog catalog,string extracted,string decoder,IReadOnlySet<string>? unavailableBanks=null)
     {
         Directory.CreateDirectory(Files.Data("waves"));Directory.CreateDirectory(Files.Data("sources"));
         var index=new Dictionary<uint,Entry[]>();var cache=new Dictionary<string,float[]>();long sourceBytes=0;
@@ -33,6 +33,12 @@ static class PreparedWaves
             foreach(var group in catalog.Nodes.Where(p=>p.Value.Kind=="Sound").GroupBy(p=>p.Value.Bank))
             {
                 string resource="natives/stm/sound/wwise/"+group.Key,path=Path.Combine(extracted,resource);
+                if(unavailableBanks?.Contains(resource)==true)
+                {
+                    if(!Setup.ExpansionBanks.Contains(resource)||File.Exists(path))throw new InvalidDataException("Invalid unavailable bank: "+resource);
+                    foreach(var (id,_) in group)index[id]=[];
+                    continue;
+                }
                 if(Files.Sha(path)!=catalog.Banks[resource])throw new InvalidDataException("Unsupported bank: "+group.Key);
                 var chunks=Setup.Chunks(File.ReadAllBytes(path));var media=new Dictionary<uint,(int Offset,int Size)>();
                 byte[] didx=chunks["DIDX"],data=chunks["DATA"];

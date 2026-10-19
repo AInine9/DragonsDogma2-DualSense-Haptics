@@ -9,6 +9,34 @@ static class Setup
 {
     public const string Script="dd2_dualsense_bridge.lua";
     public const string NativePlugin="dd2_output_observer.dll";
+    internal const string ExpansionPack="re_dlc_stm_2593290.pak";
+    // These resources were verified in this expansion archive, not in the base PAK.
+    internal static readonly HashSet<string> ExpansionBanks = new(new[]{
+        "ch250001_se_es", "ch250001_se_m", "ch253012_se_es", "ch253012_se_m",
+        "ch258002_se_es", "ch258002_se_m", "ch261001_se_es", "ch261001_se_m",
+        "ch270000_se_es", "ch270000_se_m", "pm_pl_nrd_m"
+    }.Select(n=>"natives/stm/sound/wwise/"+n+".sbnk.1.x64"),StringComparer.Ordinal);
+    internal static string[] ExpansionPacks(string game)
+    {
+        string folder=Path.Combine(game,"dlc"),pack=Path.Combine(folder,ExpansionPack);
+        if(!File.Exists(pack))return [];
+        return new[]{pack}.Concat(Directory.GetFiles(folder,ExpansionPack+".patch_*.pak").Order(StringComparer.Ordinal)).ToArray();
+    }
+    internal static HashSet<string> ValidateBanks(SoundCatalog catalog,string extracted,bool expansionInstalled)
+    {
+        var unavailable=new HashSet<string>(StringComparer.Ordinal);
+        foreach(var (resource,hash) in catalog.Banks)
+        {
+            string path=Path.Combine(extracted,resource);
+            if(!File.Exists(path))
+            {
+                if(!expansionInstalled&&ExpansionBanks.Contains(resource)){unavailable.Add(resource);continue;}
+                throw new InvalidDataException("Missing game bank: "+resource);
+            }
+            if(Files.Sha(path)!=hash)throw new InvalidDataException("Unsupported game bank (SHA-256 mismatch): "+resource);
+        }
+        return unavailable;
+    }
     static (int ExitCode,string Output) Execute(string exe,string working,params string[] args)
     {
         var si=new ProcessStartInfo(exe){UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=working,RedirectStandardOutput=true,RedirectStandardError=true};
@@ -78,6 +106,7 @@ static class Setup
         if(!prepare&&!File.Exists(Path.Combine(game,"dinput8.dll")))throw new InvalidOperationException("Install REFramework for DD2 first");
         if(!prepare)ValidateInstall(game);
         var catalog=SoundCatalog.Load();string? decoder=Option(args,"--decoder"),extractor=Option(args,"--pak-tool"),extracted=Option(args,"--extracted");
+        string[] expansionPacks=ExpansionPacks(game);
         if(decoder==null){string zip=Download("vgmstream-r2117.zip","https://github.com/vgmstream/vgmstream/releases/download/r2117/vgmstream-win64.zip","6c4a8a3813864fefed081bbd337dbc0ad93bf88e0b92f5db98d7ab258b22dc6c");string dir=Files.Data("tools/vgmstream-r2117");ZipFile.ExtractToDirectory(zip,dir,true);decoder=Path.Combine(dir,"vgmstream-cli.exe");}
         if(extracted==null)
         {
@@ -86,11 +115,17 @@ static class Setup
             string list=Files.Data("banks.list");File.WriteAllLines(list,catalog.Banks.Keys);
             foreach(string pack in new[]{Path.Combine(game,"re_chunk_000.pak")}.Concat(Directory.GetFiles(game,"re_chunk_000.pak.patch_*.pak").Order(StringComparer.Ordinal)))
                 ExtractPack(Path.GetFullPath(extractor),extracted,list,pack);
+            // Only request expansion-owned resources so its shared banks cannot replace
+            // the validated base-game versions used by this catalog.
+            string expansionList=Files.Data("banks-expansion.list");
+            File.WriteAllLines(expansionList,catalog.Banks.Keys.Where(ExpansionBanks.Contains));
+            foreach(string pack in expansionPacks)
+                ExtractPack(Path.GetFullPath(extractor),extracted,expansionList,pack);
         }
         // A successful tool exit is insufficient: verify every expected output before conversion.
-        foreach(var (resource,hash) in catalog.Banks)
-            if(!File.Exists(Path.Combine(extracted,resource))||Files.Sha(Path.Combine(extracted,resource))!=hash)throw new InvalidDataException("Missing or unsupported game bank: "+resource);
-        PreparedWaves.Prepare(catalog,Path.GetFullPath(extracted),Path.GetFullPath(decoder));
+        var unavailable=ValidateBanks(catalog,extracted,expansionPacks.Length>0);
+        if(unavailable.Count>0)Console.WriteLine($"Expansion not installed: skipping {unavailable.Count} expansion-only banks. Run setup again after installing it.");
+        PreparedWaves.Prepare(catalog,Path.GetFullPath(extracted),Path.GetFullPath(decoder),unavailable);
         (config with {Game=game}).Save();
         if(!prepare)Install(game);
         Console.WriteLine(prepare?"Assets prepared; game files were not changed.":"Setup complete. Use Start-Mod.cmd.");
